@@ -1,0 +1,28 @@
+# Claude Code local state
+.claude/settings.local.json
+
+# Jira REST credentials (project-init "Jira, credentials" tracker choice)
+.claude/jira.local.json
+
+# Bitbucket app-password credentials (project-init, remote is bitbucket.org)
+.claude/bitbucket.local.json
+
+# Per-issue git worktrees (one per agent, created and removed by the workflow)
+.claude/worktrees/
+
+# Agent task board: the directories are tracked, the cards are local state
+.claude/tasks/**
+!.claude/tasks/**/
+!.claude/tasks/**/.gitkeep
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# The bootstrap adds stack-specific entries (target/, node_modules/, build/,
+# .venv/, __pycache__/, cover.out) when it knows the language.
