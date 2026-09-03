@@ -24,5 +24,10 @@
 .DS_Store
 Thumbs.db
 
-# The bootstrap adds stack-specific entries (target/, node_modules/, build/,
-# .venv/, __pycache__/, cover.out) when it knows the language.
+# Rust build artifacts
+target/
+
+
+# Added by cargo
+
+/target

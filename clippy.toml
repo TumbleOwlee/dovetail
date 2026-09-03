@@ -1,0 +1,2 @@
+# Deny the lint families that let a panic reach a user of the library.
+avoid-breaking-exported-api = false
