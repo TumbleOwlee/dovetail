@@ -4,6 +4,7 @@ mod app;
 mod atlassian;
 mod command;
 mod config;
+mod diff;
 mod event;
 mod github;
 #[cfg(test)]

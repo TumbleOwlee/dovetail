@@ -1,7 +1,7 @@
 //! Issue details as overlay content.
 
 use crate::github::issue::{Issue, IssueState, PullRef};
-use crate::view::dialog::details::{DetailsContent, Link, SidebarBox};
+use crate::view::dialog::details::{DetailsContent, Link, Panes, SidebarBox};
 use crate::view::dialog::pull::{badges, logins, plain};
 use ratatui::text::Line;
 
@@ -28,6 +28,7 @@ pub fn content(issue: Issue) -> DetailsContent {
         IssueState::Closed => "closed",
     };
     DetailsContent {
+        panes: Panes::Conversation,
         title: issue.title,
         state,
         author: issue.author,
@@ -142,6 +143,7 @@ mod tests {
         assert_eq!(text(&c.boxes[3]), vec!["v1"]);
         assert_eq!(text(&c.boxes[4]), vec!["parent #3 Epic", "sub #8 Child"]);
         assert_eq!(text(&c.boxes[5]), vec!["#5 Fix crash"]);
+        assert_eq!(c.panes, Panes::Conversation);
         assert_eq!(text(&c.boxes[6]), vec!["@octo"]);
         assert_eq!(text(&c.boxes[5]), vec!["#5 Fix crash"]);
         assert_eq!(

@@ -60,3 +60,7 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-028** | A timeline item's actor account was deleted | The title shows `@ghost`; cites TU-R-066 |
 | **TU-E-029** | Enter in a details overlay with the focus outside `Development`, or on an empty `Development` box | Nothing happens; the overlay stays open; cites TU-R-071 |
 | **TU-E-030** | Enter on a `Development` entry while the target tab's list is unavailable, loading or failed | The tab switches and the overlay opens anyway; the list underneath keeps its state; cites TU-R-071 |
+| **TU-E-031** | The selected changed file has no patch | Both diff sides read `No diff available` in the placeholder color; cites TU-R-074 |
+| **TU-E-032** | A patch holds a hunk header without parseable line starts, or a line with no `+`, `-`, space or `\\` prefix | The header is shown verbatim and numbering restarts at 1; the line is shown as context; a truncated patch never fails to render; cites TU-R-074 |
+| **TU-E-033** | The pull request has no changed files | The tree reads `None`; both diff sides are empty; `j`, `k` and Tab do nothing harmful; cites TU-R-074 |
+| **TU-E-034** | Ctrl+T in the issue details overlay, or a digit beyond the last overlay tab after Ctrl+T | Consumed without effect; cites TU-R-072 |

@@ -3,6 +3,7 @@
 use ferrowl_ui::COLOR_SCHEME;
 use ferrowl_ui::style::{InputFieldStyle, ScrollingTabsStyle, SelectionStyle};
 use ratatui::style::{Color, Style};
+use ratatui::text::Line;
 
 /// Background of every view, darker than the scheme's own.
 pub const BG: Color = Color::Rgb(18, 18, 18);
@@ -75,6 +76,14 @@ pub fn base() -> Style {
 /// `color` on the background.
 pub fn on_bg(color: Color) -> Style {
     Style::default().fg(color).bg(BG)
+}
+
+/// The line on the highlight background, every span included.
+pub fn highlighted(mut line: Line<'static>) -> Line<'static> {
+    for span in &mut line.spans {
+        span.style = span.style.bg(TEMPLATE.hi_bg);
+    }
+    line.patch_style(Style::new().bg(TEMPLATE.hi_bg))
 }
 
 /// The scheme's input field style on [`BG`].

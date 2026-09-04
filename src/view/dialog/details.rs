@@ -1,18 +1,22 @@
 //! Details overlay shared by issues and pull requests: a description card and one box per
 //! timeline item at the left, scrolled together, and a bar of focusable boxes at the right.
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
+use ferrowl_ui::state::ScrollingTabsState;
+use ferrowl_ui::widgets::ScrollingTabsBuilder;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, HorizontalAlignment, Layout, Margin, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Widget};
+use ratatui::widgets::{Block, Clear, Paragraph, StatefulWidget, Widget};
 
 use crate::github::board::Label;
-use crate::github::pull::ReviewState;
+use crate::github::files::ChangedFile;
+use crate::github::pull::{Commit, ReviewState};
 use crate::github::timeline::{Event, TimelineItem};
 use crate::view::board::wrap_title;
 use crate::view::board::{badge_text_color, label_color};
+use crate::view::dialog::{commits, files::FilesState};
 use crate::view::{notice, theme};
 
 /// Screen cells left free around the overlay on each side.
@@ -54,9 +58,57 @@ pub struct SidebarBox {
     pub links: Vec<Link>,
 }
 
+/// The tabs of a pull request overlay; an issue has only the conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Panes {
+    Conversation,
+    Pull {
+        commits: Vec<Commit>,
+        files: Vec<ChangedFile>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailsTab {
+    Conversation,
+    Commits,
+    Files,
+}
+
+impl DetailsTab {
+    pub const ALL: [DetailsTab; 3] = [
+        DetailsTab::Conversation,
+        DetailsTab::Commits,
+        DetailsTab::Files,
+    ];
+
+    fn index(self) -> usize {
+        DetailsTab::ALL.iter().position(|t| *t == self).unwrap_or(0)
+    }
+
+    /// Wraps at both ends.
+    fn next(self) -> DetailsTab {
+        DetailsTab::ALL[(self.index() + 1) % DetailsTab::ALL.len()]
+    }
+
+    /// Wraps at both ends.
+    fn previous(self) -> DetailsTab {
+        DetailsTab::ALL[(self.index() + DetailsTab::ALL.len() - 1) % DetailsTab::ALL.len()]
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            DetailsTab::Conversation => "Conversation",
+            DetailsTab::Commits => "Commits",
+            DetailsTab::Files => "Files Changed",
+        }
+    }
+}
+
 /// What the overlay shows once loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetailsContent {
+    pub panes: Panes,
     pub title: String,
     /// `open`, `closed`, `merged` or `draft`.
     pub state: &'static str,
@@ -87,6 +139,12 @@ enum Content {
         focus: usize,
         /// Entry the focused box's cursor rests on.
         cursor: usize,
+        tab: DetailsTab,
+        /// Ctrl+T was pressed; the next key selects a tab.
+        prefix: bool,
+        /// The selected commit of the `Commits` tab.
+        commit: usize,
+        files: FilesState,
     },
 }
 
@@ -113,17 +171,25 @@ impl DetailsDialog {
     pub fn set_result(&mut self, result: Result<DetailsContent, impl ToString>) {
         self.content = match result {
             Ok(content) => Content::Loaded {
+                files: FilesState::new(match &content.panes {
+                    Panes::Conversation => &[],
+                    Panes::Pull { files, .. } => files,
+                }),
                 content: Box::new(content),
                 scroll: 0,
                 focus: 0,
                 cursor: 0,
+                tab: DetailsTab::Conversation,
+                prefix: false,
+                commit: 0,
             },
             Err(e) => Content::Failed(e.to_string()),
         };
     }
 
-    pub fn handle_key(&mut self, code: KeyCode) -> DetailsEvent {
-        if matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
+    pub fn handle_key(&mut self, modifiers: KeyModifiers, code: KeyCode) -> DetailsEvent {
+        let armed = matches!(self.content, Content::Loaded { prefix: true, .. });
+        if !armed && matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
             return DetailsEvent::Close;
         }
         let Content::Loaded {
@@ -131,10 +197,56 @@ impl DetailsDialog {
             scroll,
             focus,
             cursor,
+            tab,
+            prefix,
+            commit,
+            files,
         } = &mut self.content
         else {
             return DetailsEvent::Consumed;
         };
+        let (commits, changed): (&[Commit], &[ChangedFile]) = match &content.panes {
+            Panes::Conversation => (&[], &[]),
+            Panes::Pull { commits, files } => (commits, files),
+        };
+        if std::mem::take(prefix) {
+            if matches!(content.panes, Panes::Pull { .. }) {
+                match code {
+                    KeyCode::Char('l') => *tab = tab.next(),
+                    KeyCode::Char('h') => *tab = tab.previous(),
+                    KeyCode::Char(c) => {
+                        if let Some(t) =
+                            c.to_digit(10).and_then(|n| DetailsTab::ALL.get(n as usize))
+                        {
+                            *tab = *t;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return DetailsEvent::Consumed;
+        }
+        if (modifiers, code) == (KeyModifiers::CONTROL, KeyCode::Char('t')) {
+            *prefix = true;
+            return DetailsEvent::Consumed;
+        }
+        match tab {
+            DetailsTab::Conversation => {}
+            DetailsTab::Commits => {
+                match code {
+                    KeyCode::Char('j') => {
+                        *commit = (*commit + 1).min(commits.len().saturating_sub(1))
+                    }
+                    KeyCode::Char('k') => *commit = commit.saturating_sub(1),
+                    _ => {}
+                }
+                return DetailsEvent::Consumed;
+            }
+            DetailsTab::Files => {
+                files.handle_key(changed, code);
+                return DetailsEvent::Consumed;
+            }
+        }
         let boxes = content.boxes.len().max(1);
         let entries = content.boxes.get(*focus).map_or(0, |b| b.links.len());
         match code {
@@ -173,15 +285,55 @@ impl DetailsDialog {
                 scroll,
                 focus,
                 cursor,
+                tab,
+                commit,
+                files,
+                ..
             } => {
-                let [left, bar] =
-                    Layout::horizontal([Constraint::Min(0), Constraint::Length(BAR_WIDTH)])
-                        .areas(inner);
-                render_cards(content, number, scroll, left, buf);
-                render_bar(&content.boxes, *focus, *cursor, bar, buf);
+                let body = match &content.panes {
+                    Panes::Conversation => inner,
+                    Panes::Pull { .. } => {
+                        let [line, body] =
+                            Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
+                                .areas(inner);
+                        render_tab_line(line, buf, *tab);
+                        body
+                    }
+                };
+                match (&content.panes, *tab) {
+                    (Panes::Pull { commits, .. }, DetailsTab::Commits) => {
+                        commits::render(commits, *commit, body, buf);
+                    }
+                    (Panes::Pull { files: changed, .. }, DetailsTab::Files) => {
+                        files.render(changed, body, buf);
+                    }
+                    _ => {
+                        let [left, bar] =
+                            Layout::horizontal([Constraint::Min(0), Constraint::Length(BAR_WIDTH)])
+                                .areas(body);
+                        render_cards(content, number, scroll, left, buf);
+                        render_bar(&content.boxes, *focus, *cursor, bar, buf);
+                    }
+                }
             }
         }
     }
+}
+
+/// ` [<index>] <title> ` per tab, the active one selected.
+fn render_tab_line(area: Rect, buf: &mut Buffer, active: DetailsTab) {
+    let mut state = ScrollingTabsState {
+        titles: DetailsTab::ALL
+            .iter()
+            .map(|t| format!(" [{}] {} ", t.index(), t.title()))
+            .collect::<Vec<String>>(),
+        selected: active.index(),
+    };
+    let tabs = ScrollingTabsBuilder::<String>::default()
+        .style(theme::scrolling_tabs_style())
+        .build()
+        .expect("ScrollingTabsBuilder fields all default");
+    StatefulWidget::render(&tabs, area, buf, &mut state);
 }
 
 /// A bordered card's text: title line, then its lines.
@@ -227,7 +379,7 @@ fn render_bar(boxes: &[SidebarBox], focus: usize, cursor: usize, area: Rect, buf
             && cursor < item.links.len()
             && let Some(line) = lines.get_mut(cursor)
         {
-            *line = std::mem::take(line).patch_style(Style::new().bg(theme::TEMPLATE.hi_bg));
+            *line = theme::highlighted(std::mem::take(line));
         }
         if lines.is_empty() {
             lines.push(Line::styled(
@@ -456,6 +608,7 @@ mod tests {
 
     fn content(body: &str, timeline: Vec<TimelineItem>) -> DetailsContent {
         DetailsContent {
+            panes: Panes::Conversation,
             title: "Fix crash".into(),
             state: "open",
             author: Some("octo".into()),
@@ -640,7 +793,10 @@ mod tests {
         assert!(rows.iter().any(|r| r.contains("comment 1")), "{rows:?}");
         assert!(!rows.iter().any(|r| r.contains("comment 30")), "{rows:?}");
         for _ in 0..500 {
-            assert_eq!(d.handle_key(KeyCode::Char('j')), DetailsEvent::Consumed);
+            assert_eq!(
+                d.handle_key(KeyModifiers::NONE, KeyCode::Char('j')),
+                DetailsEvent::Consumed
+            );
         }
         let rows = render_rows(80, 20, |f| d.render(f.area(), f.buffer_mut()));
         assert!(
@@ -652,7 +808,7 @@ mod tests {
             "no scrolling past the end: {rows:?}"
         );
         for _ in 0..500 {
-            d.handle_key(KeyCode::Char('k'));
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('k'));
         }
         let rows = render_rows(80, 20, |f| d.render(f.area(), f.buffer_mut()));
         assert!(rows.iter().any(|r| r.contains("Fix crash")), "{rows:?}");
@@ -680,9 +836,12 @@ mod tests {
             links: vec![issue.clone(), pull.clone()],
         });
         d.set_result(Ok::<_, String>(c));
-        assert_eq!(d.handle_key(KeyCode::Enter), DetailsEvent::Consumed);
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Enter),
+            DetailsEvent::Consumed
+        );
         for _ in 0..3 {
-            d.handle_key(KeyCode::Tab);
+            d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
         }
         let buf = render_buffer(80, 24, |f| d.render(f.area(), f.buffer_mut()));
         let bg_of = |text: &str| {
@@ -699,38 +858,200 @@ mod tests {
         };
         assert_eq!(bg_of("#7 Crash"), theme::TEMPLATE.hi_bg, "cursor entry");
         assert_ne!(bg_of("#9 Fix"), theme::TEMPLATE.hi_bg, "other entry");
-        assert_eq!(d.handle_key(KeyCode::Down), DetailsEvent::Consumed);
         assert_eq!(
-            d.handle_key(KeyCode::Down),
+            d.handle_key(KeyModifiers::NONE, KeyCode::Down),
+            DetailsEvent::Consumed
+        );
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Down),
             DetailsEvent::Consumed,
             "clamped"
         );
-        assert_eq!(d.handle_key(KeyCode::Enter), DetailsEvent::Open(pull));
-        d.handle_key(KeyCode::Up);
         assert_eq!(
-            d.handle_key(KeyCode::Enter),
+            d.handle_key(KeyModifiers::NONE, KeyCode::Enter),
+            DetailsEvent::Open(pull)
+        );
+        d.handle_key(KeyModifiers::NONE, KeyCode::Up);
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Enter),
             DetailsEvent::Open(issue.clone())
         );
-        d.handle_key(KeyCode::Down);
-        d.handle_key(KeyCode::BackTab);
-        d.handle_key(KeyCode::Tab);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Down);
+        d.handle_key(KeyModifiers::NONE, KeyCode::BackTab);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
         assert_eq!(
-            d.handle_key(KeyCode::Enter),
+            d.handle_key(KeyModifiers::NONE, KeyCode::Enter),
             DetailsEvent::Open(issue),
             "reset"
         );
-        d.handle_key(KeyCode::Tab);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
         assert_eq!(
-            d.handle_key(KeyCode::Enter),
+            d.handle_key(KeyModifiers::NONE, KeyCode::Enter),
             DetailsEvent::Consumed,
             "Reviewers"
         );
-        assert_eq!(d.handle_key(KeyCode::Tab), DetailsEvent::Consumed);
         assert_eq!(
-            d.handle_key(KeyCode::Enter),
+            d.handle_key(KeyModifiers::NONE, KeyCode::Tab),
+            DetailsEvent::Consumed
+        );
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Enter),
             DetailsEvent::Consumed,
             "empty box"
         );
+    }
+
+    #[test]
+    /// TU-R-072, TU-E-034 — a pull request overlay shows the tab line and Ctrl+T then l/h/digit switches its tab; an issue overlay shows none and Ctrl+T does nothing.
+    fn ut_pull_tabs() {
+        let ctrl_t =
+            |d: &mut DetailsDialog| d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        let mut d = DetailsDialog::new(5, "Fix".into(), "Loading");
+        let mut c = content("body", vec![]);
+        c.panes = Panes::Pull {
+            commits: vec![Commit {
+                sha: "abc1234".into(),
+                headline: "Fix crash".into(),
+                author: "octo".into(),
+                date: "2026-09-03T10:00:00Z".into(),
+            }],
+            files: vec![ChangedFile {
+                path: "src/main.rs".into(),
+                previous_path: None,
+                status: crate::github::files::FileStatus::Modified,
+                additions: 1,
+                deletions: 0,
+                patch: Some("@@ -1 +1,2 @@\n a\n+b\n".into()),
+            }],
+        };
+        d.set_result(Ok::<_, String>(c));
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            rows[4].contains("[0] Conversation")
+                && rows[4].contains("[1] Commits")
+                && rows[4].contains("[2] Files Changed"),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|r| r.contains(" Reviewers ")), "{rows:?}");
+        assert_eq!(ctrl_t(&mut d), DetailsEvent::Consumed);
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('1')),
+            DetailsEvent::Consumed
+        );
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            rows.iter()
+                .any(|r| r.contains(" Commits ") && !r.contains("[1]")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("abc1234") && r.contains("Fix crash")),
+            "{rows:?}"
+        );
+        assert!(!rows.iter().any(|r| r.contains(" Reviewers ")), "{rows:?}");
+        ctrl_t(&mut d);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('l'));
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            rows.iter()
+                .any(|r| r.contains(" Files ") && r.contains(" src/main.rs ")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.matches("   1 a").count() == 2)
+                && rows.iter().any(|r| r.contains("   2 b")),
+            "{rows:?}"
+        );
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        assert!(
+            matches!(&d.content, Content::Loaded { focus: 0, files, .. } if files.focus() == crate::view::dialog::files::Panel::Old),
+            "Tab moves the panel focus, not the bar's"
+        );
+        ctrl_t(&mut d);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('l'));
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            rows.iter().any(|r| r.contains(" Reviewers ")),
+            "wrapped to Conversation: {rows:?}"
+        );
+        ctrl_t(&mut d);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('h'));
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            rows.iter().any(|r| r.contains(" Files ")),
+            "wrapped back to Files: {rows:?}"
+        );
+        ctrl_t(&mut d);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('7'));
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            rows.iter().any(|r| r.contains(" Files ")),
+            "digit beyond the last tab: {rows:?}"
+        );
+        ctrl_t(&mut d);
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('q')),
+            DetailsEvent::Consumed,
+            "the prefix eats q"
+        );
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('q')),
+            DetailsEvent::Close
+        );
+
+        let mut d = DetailsDialog::new(5, "Fix".into(), "Loading");
+        d.set_result(Ok::<_, String>(content("body", vec![])));
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(!rows.iter().any(|r| r.contains("Conversation")), "{rows:?}");
+        assert_eq!(ctrl_t(&mut d), DetailsEvent::Consumed);
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('1')),
+            DetailsEvent::Consumed
+        );
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(rows.iter().any(|r| r.contains(" Reviewers ")), "{rows:?}");
+    }
+
+    #[test]
+    /// TU-R-073 — j and k move the commit selection in the Commits tab.
+    fn ut_commit_selection() {
+        let mut d = DetailsDialog::new(5, "Fix".into(), "Loading");
+        let mut c = content("body", vec![]);
+        c.panes = Panes::Pull {
+            commits: (1..=3)
+                .map(|i| Commit {
+                    sha: format!("sha{i}"),
+                    headline: format!("c{i}"),
+                    author: "o".into(),
+                    date: "2026-09-03T10:00:00Z".into(),
+                })
+                .collect(),
+            files: vec![],
+        };
+        d.set_result(Ok::<_, String>(c));
+        d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('1'));
+        for _ in 0..5 {
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('j'));
+        }
+        assert!(
+            matches!(&d.content, Content::Loaded { commit: 2, .. }),
+            "clamped"
+        );
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('k'));
+        assert!(matches!(&d.content, Content::Loaded { commit: 1, .. }));
+        let buf = render_buffer(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        let (x, y) = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                (x..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .starts_with("sha2")
+            })
+            .expect("sha2 drawn");
+        assert_eq!(buf[(x, y)].bg, theme::TEMPLATE.hi_bg);
     }
 
     #[test]
@@ -952,15 +1273,18 @@ mod tests {
             out
         };
         assert_eq!(focused(&mut d), vec!["Reviewers"]);
-        assert_eq!(d.handle_key(KeyCode::Tab), DetailsEvent::Consumed);
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Tab),
+            DetailsEvent::Consumed
+        );
         assert_eq!(focused(&mut d), vec!["Assignees"]);
-        d.handle_key(KeyCode::Tab);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
         assert_eq!(focused(&mut d), vec!["Labels"]);
-        d.handle_key(KeyCode::Tab);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
         assert_eq!(focused(&mut d), vec!["Reviewers"], "wraps to the first");
-        d.handle_key(KeyCode::BackTab);
+        d.handle_key(KeyModifiers::NONE, KeyCode::BackTab);
         assert_eq!(focused(&mut d), vec!["Labels"], "reverse wraps to the last");
-        d.handle_key(KeyCode::Char('j'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('j'));
         assert_eq!(focused(&mut d), vec!["Labels"], "scrolling keeps the focus");
 
         let rows = render_rows(80, 13, |f| d.render(f.area(), f.buffer_mut()));
@@ -976,9 +1300,21 @@ mod tests {
     /// TU-R-061, TU-R-067 — Esc and `q` close; other keys are consumed.
     fn ut_close_keys() {
         let mut d = DetailsDialog::new(5, "T".into(), "L");
-        assert_eq!(d.handle_key(KeyCode::Esc), DetailsEvent::Close);
-        assert_eq!(d.handle_key(KeyCode::Char('q')), DetailsEvent::Close);
-        assert_eq!(d.handle_key(KeyCode::Char('x')), DetailsEvent::Consumed);
-        assert_eq!(d.handle_key(KeyCode::Tab), DetailsEvent::Consumed);
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Esc),
+            DetailsEvent::Close
+        );
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('q')),
+            DetailsEvent::Close
+        );
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('x')),
+            DetailsEvent::Consumed
+        );
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Tab),
+            DetailsEvent::Consumed
+        );
     }
 }

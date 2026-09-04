@@ -377,7 +377,7 @@ impl App {
             return;
         }
         if let Some(issue) = self.issue.as_mut() {
-            match issue.handle_key(code) {
+            match issue.handle_key(modifiers, code) {
                 DetailsEvent::Consumed => {}
                 DetailsEvent::Close => self.issue = None,
                 DetailsEvent::Open(link) => {
@@ -388,7 +388,7 @@ impl App {
             return;
         }
         if let Some(pull) = self.pull.as_mut() {
-            match pull.handle_key(code) {
+            match pull.handle_key(modifiers, code) {
                 DetailsEvent::Consumed => {}
                 DetailsEvent::Close => self.pull = None,
                 DetailsEvent::Open(link) => {

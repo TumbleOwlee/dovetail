@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use crate::github::pull::{PullDetails, ReviewState};
 use crate::github::pulls::PullState;
 use crate::view::board::{badge_text_color, label_color};
-use crate::view::dialog::details::{DetailsContent, Link, SidebarBox};
+use crate::view::dialog::details::{DetailsContent, Link, Panes, SidebarBox};
 use crate::view::theme;
 
 pub const LOADING: &str = "Loading pull request..";
@@ -67,6 +67,10 @@ pub fn content(details: PullDetails) -> DetailsContent {
         (PullState::Closed, _) => "closed",
     };
     DetailsContent {
+        panes: Panes::Pull {
+            commits: details.commits,
+            files: details.files,
+        },
         title: details.title,
         state,
         author: details.author,
@@ -134,6 +138,20 @@ mod tests {
     #[test]
     /// TU-R-066, TU-R-068 — state and author carried; seven boxes in order with reviewer states, `@` logins, label badges and references.
     fn ut_pull_content() {
+        let commit = crate::github::pull::Commit {
+            sha: "abc".into(),
+            headline: "h".into(),
+            author: "o".into(),
+            date: "d".into(),
+        };
+        let file = crate::github::files::ChangedFile {
+            path: "a".into(),
+            previous_path: None,
+            status: crate::github::files::FileStatus::Added,
+            additions: 1,
+            deletions: 0,
+            patch: None,
+        };
         let details = PullDetails {
             number: 5,
             title: "Fix crash".into(),
@@ -163,6 +181,8 @@ mod tests {
                 number: 7,
                 title: "Crash on start".into(),
             }],
+            commits: vec![commit.clone()],
+            files: vec![file.clone()],
             participants: vec!["octo".into(), "a".into()],
             ..PullDetails::default()
         };
@@ -191,6 +211,13 @@ mod tests {
             vec!["@rev pending", "@a changes requested"]
         );
         assert_eq!(text(&c.boxes[5]), vec!["#7 Crash on start"]);
+        assert_eq!(
+            c.panes,
+            Panes::Pull {
+                commits: vec![commit.clone()],
+                files: vec![file.clone()]
+            }
+        );
         assert_eq!(
             c.boxes[5].links,
             vec![Link::Issue {
