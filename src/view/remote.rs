@@ -114,7 +114,6 @@ impl RemoteView {
         }
     }
 
-    #[cfg(test)]
     pub fn selected(&self) -> Option<&PullRequest> {
         let index = self.table.state.table_state().selected()?;
         self.table.state.values().get(index).map(|row| &row.0)

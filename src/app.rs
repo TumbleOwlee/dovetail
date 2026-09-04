@@ -18,6 +18,7 @@ use crate::view::command_line::{CommandLine, CommandLineEvent};
 use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteForm};
 use crate::view::dialog::config::{Choice, Field};
 use crate::view::dialog::issue::{IssueDialog, IssueEvent};
+use crate::view::dialog::pull::{PullDialog, PullEvent};
 use crate::view::loading;
 use crate::view::remote::RemoteView;
 use crate::view::tabs::{self, Tab};
@@ -47,6 +48,12 @@ pub enum FetchRequest {
         token: String,
         owner: String,
         repo: String,
+    },
+    PullRequest {
+        token: String,
+        owner: String,
+        repo: String,
+        number: u64,
     },
 }
 
@@ -78,6 +85,8 @@ pub struct App {
     pub dialog: Option<ConfigDialog>,
     /// The issue details overlay while open.
     pub issue: Option<IssueDialog>,
+    /// The pull request details overlay while open.
+    pub pull: Option<PullDialog>,
     pub command_line: CommandLine,
     pub board: BoardState,
     pub remote: RemoteState,
@@ -110,6 +119,7 @@ impl App {
             active_tab: Tab::Board,
             dialog,
             issue: None,
+            pull: None,
             command_line: CommandLine::new(),
             board: BoardState::Unavailable,
             remote: RemoteState::Unavailable,
@@ -183,6 +193,25 @@ impl App {
         true
     }
 
+    /// Opens the details overlay for the selected pull request and queues its request.
+    fn open_pull(&mut self) {
+        let RemoteState::Loaded(view) = &self.remote else {
+            return;
+        };
+        let (Some(pull), Some((owner, repo, token))) = (view.selected(), self.github_remote())
+        else {
+            return;
+        };
+        let request = FetchRequest::PullRequest {
+            token: token.to_string(),
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            number: pull.number,
+        };
+        self.pull = Some(PullDialog::new(pull.number, pull.title.clone()));
+        self.pending_fetches.push(request);
+    }
+
     /// Opens the details overlay for the selected card and queues its request.
     fn open_issue(&mut self) {
         let BoardState::Loaded(view) = &self.board else {
@@ -221,6 +250,12 @@ impl App {
             };
             return;
         }
+        if let Message::PullRequest(result) = message {
+            if let Some(dialog) = self.pull.as_mut() {
+                dialog.set_result(result);
+            }
+            return;
+        }
         if let Message::Issue(result) = message {
             if let Some(dialog) = self.issue.as_mut() {
                 dialog.set_result(result);
@@ -254,7 +289,10 @@ impl App {
             )),
             Message::GithubProjects(Err(e)) => Err(e.to_string()),
             Message::JiraProjects(Err(e)) => Err(e.to_string()),
-            Message::Board(_) | Message::Issue(_) | Message::PullRequests(_) => {
+            Message::Board(_)
+            | Message::Issue(_)
+            | Message::PullRequests(_)
+            | Message::PullRequest(_) => {
                 unreachable!("handled above")
             }
         };
@@ -301,6 +339,12 @@ impl App {
             }
             return;
         }
+        if let Some(pull) = self.pull.as_mut() {
+            if pull.handle_key(code) == PullEvent::Close {
+                self.pull = None;
+            }
+            return;
+        }
         if self.command_line.is_open() {
             match self.command_line.handle_key(modifiers, code) {
                 CommandLineEvent::Consumed | CommandLineEvent::Cancel => {}
@@ -333,6 +377,9 @@ impl App {
                 if let BoardState::Loaded(view) = &mut self.board {
                     view.handle_key(code);
                 }
+            }
+            (KeyModifiers::NONE, KeyCode::Enter) if self.active_tab == Tab::Remote => {
+                self.open_pull();
             }
             (modifiers, code) if self.active_tab == Tab::Remote => {
                 if let RemoteState::Loaded(view) = &mut self.remote {
@@ -381,6 +428,9 @@ impl App {
         self.command_line.render(bottom, buf);
         if let Some(issue) = self.issue.as_mut() {
             issue.render(area, buf);
+        }
+        if let Some(pull) = self.pull.as_mut() {
+            pull.render(area, buf);
         }
         if let Some(dialog) = self.dialog.as_mut() {
             dialog.render(area, buf);
@@ -1324,5 +1374,51 @@ mod tests {
             rows.iter().any(|r| r.contains("owner: o")),
             "summary stays: {rows:?}"
         );
+    }
+
+    #[test]
+    /// TU-R-065, TU-R-067, TU-E-025 — Enter on a row requests the pull request and opens the overlay, which takes keys until closed; a late result is discarded.
+    fn ut_enter_opens_pull_details() {
+        let t = TempDir::new("pull");
+        let mut a = app(&t, Some(remote_settings()));
+        a.take_fetch_requests();
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        key(&mut a, KeyCode::Char('1'));
+        key(&mut a, KeyCode::Enter);
+        assert!(
+            a.take_fetch_requests().is_empty() && a.pull.is_none(),
+            "no row yet"
+        );
+        a.handle_message(Message::PullRequests(Ok(vec![
+            crate::github::pulls::PullRequest {
+                number: 5,
+                title: "Fix crash".into(),
+                ..Default::default()
+            },
+        ])));
+        key(&mut a, KeyCode::Enter);
+        assert_eq!(
+            a.take_fetch_requests(),
+            vec![FetchRequest::PullRequest {
+                token: "t".into(),
+                owner: "o".into(),
+                repo: "r".into(),
+                number: 5
+            }]
+        );
+        let rows = render_rows(80, 24, |f| a.render(f));
+        assert!(rows.iter().any(|r| r.contains("#5 Fix crash")), "{rows:?}");
+        assert!(
+            rows.iter().any(|r| r.contains("Loading pull request..")),
+            "{rows:?}"
+        );
+        key(&mut a, KeyCode::Char(':'));
+        assert!(!a.command_line.is_open(), "overlay takes the key");
+        key(&mut a, KeyCode::Esc);
+        assert!(a.pull.is_none());
+        a.handle_message(Message::PullRequest(Err(
+            crate::github::GithubError::MissingPullRequest,
+        )));
+        assert!(a.pull.is_none(), "late result discarded");
     }
 }

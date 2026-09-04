@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use crate::app::{App, FetchRequest};
 use crate::atlassian::{self, AtlassianError, JiraProject};
 use crate::github::issue::Issue;
+use crate::github::pull::PullDetails;
 use crate::github::pulls::PullRequest;
 use crate::github::{self, Board, GithubError, Project};
 
@@ -18,6 +19,7 @@ pub enum Message {
     Board(Result<Board, GithubError>),
     Issue(Result<Issue, GithubError>),
     PullRequests(Result<Vec<PullRequest>, GithubError>),
+    PullRequest(Result<PullDetails, GithubError>),
 }
 
 /// Performs one fetch and sends its outcome; a dropped receiver ends it silently.
@@ -43,6 +45,14 @@ pub async fn dispatch(request: FetchRequest, client: reqwest::Client, tx: mpsc::
         }
         FetchRequest::PullRequests { token, owner, repo } => Message::PullRequests(
             github::pulls::load_pull_requests(&client, &token, &owner, &repo).await,
+        ),
+        FetchRequest::PullRequest {
+            token,
+            owner,
+            repo,
+            number,
+        } => Message::PullRequest(
+            github::pull::load_pull_request(&client, &token, &owner, &repo, number).await,
         ),
     };
     let _ = tx.send(message).await;

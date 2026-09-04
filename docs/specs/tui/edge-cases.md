@@ -53,3 +53,5 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-021** | Issue details arrive after the overlay was closed | Discarded; cites TU-R-059 |
 | **TU-E-022** | The remote section is Bitbucket, or credentials are missing | The Git Remote tab keeps showing the configuration summary; cites TU-R-062 |
 | **TU-E-023** | The repository has no pull requests | The table shows only its header; cites TU-R-063 |
+| **TU-E-024** | A pull request has no comments | The comments card reads `No comments`; cites TU-R-066 |
+| **TU-E-025** | Pull request details arrive after the overlay was closed | Discarded; cites TU-R-065 |

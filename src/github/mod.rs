@@ -3,6 +3,7 @@
 pub mod board;
 pub mod issue;
 pub mod projects;
+pub mod pull;
 pub mod pulls;
 
 pub use board::{Board, Card};
