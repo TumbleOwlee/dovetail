@@ -12,6 +12,7 @@ use crate::config::{
     Board, ConfigError, Origin, Profile, Section, Settings, Source, UserConfig, paths, store,
 };
 use crate::event::Message;
+use crate::view::board::BoardView;
 use crate::view::command_line::{CommandLine, CommandLineEvent};
 use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteForm};
 use crate::view::dialog::config::{Choice, Field};
@@ -29,6 +30,20 @@ pub enum FetchRequest {
         email: String,
         token: String,
     },
+    Board {
+        token: String,
+        owner: String,
+        number: u64,
+    },
+}
+
+/// What the Task Board tab body shows.
+pub enum BoardState {
+    /// No request is possible: the tab shows the configuration summary.
+    Unavailable,
+    Loading,
+    Failed(String),
+    Loaded(BoardView),
 }
 
 pub struct App {
@@ -40,6 +55,7 @@ pub struct App {
     pub active_tab: Tab,
     pub dialog: Option<ConfigDialog>,
     pub command_line: CommandLine,
+    pub board: BoardState,
     pending_fetches: Vec<FetchRequest>,
     /// A dialog built by `config` that opens once its project list arrives.
     waiting_dialog: Option<ConfigDialog>,
@@ -60,7 +76,7 @@ impl App {
         let dialog = settings
             .is_none()
             .then(|| ConfigDialog::new(origin.as_ref()));
-        App {
+        let mut app = App {
             repo_root,
             user_path,
             user_config,
@@ -69,11 +85,38 @@ impl App {
             active_tab: Tab::Board,
             dialog,
             command_line: CommandLine::new(),
+            board: BoardState::Unavailable,
             pending_fetches: Vec::new(),
             waiting_dialog: None,
             tab_prefix: false,
             quit: false,
-        }
+        };
+        app.request_board();
+        app
+    }
+
+    /// Queues a board request when the board is GitHub with stored credentials.
+    fn request_board(&mut self) -> bool {
+        let Some(settings) = &self.settings else {
+            return false;
+        };
+        let profile = settings
+            .board
+            .credentials()
+            .and_then(|name| self.user_config.credentials.get(name));
+        let (Board::Github { owner, project, .. }, Some(Profile::Github { token })) =
+            (&settings.board, profile)
+        else {
+            self.board = BoardState::Unavailable;
+            return false;
+        };
+        self.pending_fetches.push(FetchRequest::Board {
+            token: token.clone(),
+            owner: owner.clone(),
+            number: project.get(),
+        });
+        self.board = BoardState::Loading;
+        true
     }
 
     /// Fetches queued since the last call, for the loop to run.
@@ -84,6 +127,13 @@ impl App {
     /// A fetch outcome: opens the waiting dialog with the list, or reports the failure.
     /// Ignored when no dialog is waiting.
     pub fn handle_message(&mut self, message: Message) {
+        if let Message::Board(outcome) = message {
+            self.board = match outcome {
+                Ok(board) => BoardState::Loaded(BoardView::new(board)),
+                Err(e) => BoardState::Failed(e.to_string()),
+            };
+            return;
+        }
         let Some(mut dialog) = self.waiting_dialog.take() else {
             return;
         };
@@ -111,6 +161,7 @@ impl App {
             )),
             Message::GithubProjects(Err(e)) => Err(e.to_string()),
             Message::JiraProjects(Err(e)) => Err(e.to_string()),
+            Message::Board(_) => unreachable!("handled above"),
         };
         match outcome {
             Ok((field, choices)) => {
@@ -174,6 +225,11 @@ impl App {
             (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(':')) => {
                 self.command_line.open();
             }
+            (KeyModifiers::NONE, code) if self.active_tab == Tab::Board => {
+                if let BoardState::Loaded(view) = &mut self.board {
+                    view.handle_key(code);
+                }
+            }
             _ => {}
         }
     }
@@ -193,7 +249,16 @@ impl App {
         let lines = tabs::summary_lines(self.active_tab, self.settings.as_ref(), present);
         let buf = frame.buffer_mut();
         tabs::render_tab_line(top, buf, self.active_tab, self.settings.as_ref());
-        tabs::render_body(middle, buf, &lines);
+        match (&self.active_tab, &self.board) {
+            (Tab::Board, BoardState::Loaded(view)) => view.render(middle, buf),
+            (Tab::Board, BoardState::Loading) => {
+                tabs::render_body(middle, buf, &["loading board…".to_string()]);
+            }
+            (Tab::Board, BoardState::Failed(message)) => {
+                tabs::render_body(middle, buf, std::slice::from_ref(message));
+            }
+            _ => tabs::render_body(middle, buf, &lines),
+        }
         self.command_line.render(bottom, buf);
         if let Some(dialog) = self.dialog.as_mut() {
             dialog.render(area, buf);
@@ -210,6 +275,11 @@ impl App {
             Cmd::Remote => self.active_tab = Tab::Remote,
             Cmd::Write => self.report(self.settings.is_some(), App::write_user),
             Cmd::WriteRepo => self.report(self.settings.is_some(), App::write_repo),
+            Cmd::Reload => {
+                if !self.request_board() {
+                    self.command_line.set_error("not configured".to_string());
+                }
+            }
             Cmd::Unknown(text) => self
                 .command_line
                 .set_error(format!("unknown command: {text}")),
@@ -312,6 +382,7 @@ impl App {
                     source: Source::UserFile,
                 });
                 self.dialog = None;
+                self.request_board();
             }
             Err(e) => {
                 if let Some(dialog) = self.dialog.as_mut() {
@@ -695,8 +766,14 @@ mod tests {
         command(&mut a, "frob");
         let rows = render_rows(60, 10, |f| a.render(f));
         assert!(rows[0].contains("[0] Task Board [GitHub]"), "{}", rows[0]);
-        assert_eq!(rows[1], "kind: github");
+        assert_eq!(rows[1], "loading board…");
         assert_eq!(rows[9], "unknown command: frob");
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        key(&mut a, KeyCode::Char('1'));
+        let rows = render_rows(60, 10, |f| a.render(f));
+        assert_eq!(rows[1], "kind: github");
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        key(&mut a, KeyCode::Char('0'));
         key(&mut a, KeyCode::Char(':'));
         let rows = render_rows(60, 10, |f| a.render(f));
         assert_eq!(rows[9], ":");
@@ -773,7 +850,7 @@ mod tests {
     fn ut_config_queues_github_fetch() {
         let t = TempDir::new("fetchgh");
         let mut a = app(&t, Some(settings()));
-        assert!(a.take_fetch_requests().is_empty());
+        a.take_fetch_requests(); // the start-up board request
         command(&mut a, "config");
         assert_eq!(
             a.take_fetch_requests(),
@@ -852,6 +929,7 @@ mod tests {
     fn ut_second_config_while_waiting_requeues() {
         let t = TempDir::new("requeue");
         let mut a = app(&t, Some(settings()));
+        a.take_fetch_requests(); // the start-up board request
         command(&mut a, "config");
         command(&mut a, "config");
         assert_eq!(a.take_fetch_requests().len(), 2);
@@ -871,5 +949,123 @@ mod tests {
             value: String::new(),
             label: String::new(),
         };
+    }
+
+    fn loaded_board() -> crate::github::Board {
+        crate::github::Board {
+            title: "Roadmap".into(),
+            columns: vec![crate::github::board::Column {
+                name: "Todo".into(),
+                cards: vec![
+                    crate::github::Card {
+                        number: 1,
+                        title: "First".into(),
+                        labels: vec![],
+                        assignees: vec![],
+                    },
+                    crate::github::Card {
+                        number: 2,
+                        title: "Second".into(),
+                        labels: vec![],
+                        assignees: vec![],
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    /// TU-R-049, TU-R-050 — a GitHub board with credentials is requested at start and shows loading.
+    fn ut_board_requested_at_start() {
+        let t = TempDir::new("boardstart");
+        let mut a = app(&t, Some(settings()));
+        assert_eq!(
+            a.take_fetch_requests(),
+            vec![FetchRequest::Board {
+                token: "t".into(),
+                owner: "o".into(),
+                number: 1
+            }]
+        );
+        assert!(matches!(a.board, BoardState::Loading));
+        let rows = render_rows(60, 6, |f| a.render(f));
+        assert_eq!(rows[1], "loading board…");
+    }
+
+    #[test]
+    /// TU-E-019 — Jira or missing credentials: no request, summary stays.
+    fn ut_board_unavailable_keeps_summary() {
+        let t = TempDir::new("boardnone");
+        let mut a = app(&t, Some(jira_settings()));
+        assert!(a.take_fetch_requests().is_empty());
+        assert!(matches!(a.board, BoardState::Unavailable));
+        let rows = render_rows(60, 6, |f| a.render(f));
+        assert_eq!(rows[1], "kind: jira");
+        let mut without = settings();
+        without.board.set_credentials(None);
+        let mut a = app(&t, Some(without));
+        assert!(a.take_fetch_requests().is_empty());
+        assert!(matches!(a.board, BoardState::Unavailable));
+    }
+
+    #[test]
+    /// TU-R-050, TU-R-051, TU-R-054 — a loaded board renders and takes navigation keys; a failure shows its message.
+    fn ut_board_message_loads_or_fails() {
+        let t = TempDir::new("boardmsg");
+        let mut a = app(&t, Some(settings()));
+        a.handle_message(Message::Board(Ok(loaded_board())));
+        let rows = render_rows(60, 12, |f| a.render(f));
+        assert!(rows[1].contains("Todo (2)"), "{}", rows[1]);
+        assert!(rows[3].contains("First"), "{}", rows[3]);
+        key(&mut a, KeyCode::Char('j'));
+        match &a.board {
+            BoardState::Loaded(view) => assert_eq!(view.selected(), Some((0, 1))),
+            _ => panic!("board not loaded"),
+        }
+        a.handle_message(Message::Board(Err(crate::github::GithubError::Status(403))));
+        let rows = render_rows(60, 6, |f| a.render(f));
+        assert_eq!(rows[1], "github: HTTP 403");
+    }
+
+    #[test]
+    /// TU-R-056 — `:reload` requests the board again, or reports `not configured`.
+    fn ut_reload_command() {
+        let t = TempDir::new("reload");
+        let mut a = app(&t, Some(settings()));
+        a.take_fetch_requests();
+        a.handle_message(Message::Board(Ok(loaded_board())));
+        command(&mut a, "reload");
+        assert_eq!(a.take_fetch_requests().len(), 1);
+        assert!(matches!(a.board, BoardState::Loading));
+        let mut a = app(&t, Some(jira_settings()));
+        command(&mut a, "reload");
+        assert_eq!(a.command_line.error(), Some("not configured"));
+    }
+
+    #[test]
+    /// TU-R-049 — a confirmed dialog with GitHub credentials requests the board.
+    fn ut_confirm_requests_board() {
+        let t = TempDir::new("boardconfirm");
+        let mut a = app(&t, None);
+        assert!(a.take_fetch_requests().is_empty());
+        let d = a.dialog.as_mut().expect("dialog");
+        for (f, v) in [
+            (Field::Owner, "o"),
+            (Field::Repo, "r"),
+            (Field::BoardProject, "4"),
+            (Field::GithubToken, "tok"),
+        ] {
+            d.set_value(f, v);
+        }
+        key(&mut a, KeyCode::Enter);
+        assert!(a.dialog.is_none());
+        assert_eq!(
+            a.take_fetch_requests(),
+            vec![FetchRequest::Board {
+                token: "tok".into(),
+                owner: "o".into(),
+                number: 4
+            }]
+        );
     }
 }

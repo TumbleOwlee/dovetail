@@ -25,3 +25,12 @@ heading text verbatim.
 **GH-R-001** — The application shall list an owner's GitHub Projects (v2) through the GraphQL API, sending the token as a bearer token and querying `repositoryOwner(login)` for `projectsV2` nodes with `number` and `title`.
 **GH-R-002** — A non-success HTTP status, a GraphQL `errors` array, or a response missing the owner shall be a typed error carrying the status or the first message.
 **GH-R-003** — Listing shall request at most 100 projects; further pages are not fetched.
+
+## Board
+
+**GH-R-004** — The application shall load a project board through the GraphQL API by querying `repositoryOwner(login)`'s `projectV2(number)` for its title, its `Status` single-select field options, and its first 100 items.
+**GH-R-005** — The board's columns shall be the `Status` field's options in the field's order, followed by a `No status` column.
+**GH-R-006** — Each item whose content is an issue shall become a card carrying the issue's title, number, label names with their colors, and assignee logins.
+**GH-R-007** — An item shall be placed in the column named by its `Status` value, or in `No status` when it has none or the name matches no option.
+**GH-R-008** — An item whose content is absent, a pull request, or a draft issue shall be skipped.
+**GH-R-009** — A project that does not exist, or a GraphQL error, shall be a typed error carrying the message.

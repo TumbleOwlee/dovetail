@@ -40,3 +40,12 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-014** | Ctrl+T followed by a digit with no tab of that index | The prefix is disarmed and the active tab is unchanged; cites TU-R-021, TU-R-047 |
 | **TU-E-011** | A response arrives while no dialog is waiting for it | It is discarded; cites TU-R-038 |
 | **TU-E-015** | A key is pressed while a request is outstanding | The main view handles it as usual; a second `config` command replaces the waiting dialog and issues a new request; cites TU-R-040 |
+
+## Task Board boundaries
+
+| ID | Condition | Behavior |
+|---|---|---|
+| **TU-E-016** | The board has no cards | Columns render with their headers and no selection exists; navigation keys do nothing; cites TU-R-054 |
+| **TU-E-017** | A title is wider than the card | It is truncated to the card width; cites TU-R-052 |
+| **TU-E-018** | Badges are wider than the card | The badge line is truncated; cites TU-R-052 |
+| **TU-E-019** | The board section is Jira, or credentials are missing | The Task Board tab keeps showing the configuration summary; cites TU-R-050 |

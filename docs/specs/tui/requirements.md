@@ -70,3 +70,14 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **TU-R-046** — The owner, repository and GitHub token fields shall each be a single value shared by the Task Board and Git Remote sections: whichever section shows the field edits the same value, and confirming uses it for every GitHub section.
 **TU-R-047** — Ctrl+T in the main view shall arm a prefix that consumes exactly the next key; a key that is neither `h`, `l` nor a digit shall disarm it without any other effect.
 **TU-R-048** — While the command line is closed and no error is shown, the bottom line shall show the hint `:  command  |  C-t+h C-t+l  tabs`.
+
+## Task Board tab
+
+**TU-R-049** — When the application holds a GitHub board section whose credentials resolve to a stored profile, it shall request the board at start-up, after a confirmed configuration dialog, and on the `reload` command.
+**TU-R-050** — While the board request is outstanding, the Task Board tab body shall show `loading board…`; when it failed, the error message; when no request was possible, the configuration summary as before.
+**TU-R-051** — A loaded board shall render its columns side by side in order, each headed by the column name and its card count, filling the tab body width evenly.
+**TU-R-052** — Each card shall render as a bordered box showing the title on its first line and, on the second, one badge per label and one badge per assignee.
+**TU-R-053** — A label badge shall show the label name on a background of the label's color; an assignee badge shall show `@<login>`.
+**TU-R-054** — Exactly one card shall be selected, rendered with a highlighted border; `h` and `l` shall move the selection to the nearest card of the previous or next non-empty column, `j` and `k` to the previous or next card of the same column, all without wrapping.
+**TU-R-055** — A column shall scroll so that its selected card is visible.
+**TU-R-056** — The `reload` command shall request the board again when a request is possible, else show `not configured`.

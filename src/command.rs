@@ -12,17 +12,19 @@ pub enum Cmd {
     Remote,
     Write,
     WriteRepo,
+    Reload,
     Unknown(String),
 }
 
 /// Usage and description of every command, in the order the help box lists them.
-pub const HELP: [(&str, &str); 6] = [
+pub const HELP: [(&str, &str); 7] = [
     (":q", "quit"),
     (":config", "open the configuration dialog"),
     (":board", "show the Task Board tab"),
     (":remote", "show the Git Remote tab"),
     (":w", "write the settings to the user-level config"),
     (":wr", "write .prodgy.toml (credentials stripped)"),
+    (":reload", "load the board again"),
 ];
 
 /// Parses trimmed input into a command; unknown text keeps its trimmed form.
@@ -35,6 +37,7 @@ pub fn parse(input: &str) -> Cmd {
         "remote" => Cmd::Remote,
         "w" => Cmd::Write,
         "wr" => Cmd::WriteRepo,
+        "reload" => Cmd::Reload,
         other => Cmd::Unknown(other.to_string()),
     }
 }
@@ -44,7 +47,7 @@ mod tests {
     use super::*;
 
     #[test]
-    /// TU-R-029, TU-R-030, TU-R-031, TU-R-032, TU-R-033 — each name parses to its command.
+    /// TU-R-029, TU-R-030, TU-R-031, TU-R-032, TU-R-033, TU-R-056 — each name parses to its command.
     fn ut_parse_known_commands() {
         assert_eq!(parse("q"), Cmd::Quit);
         assert_eq!(parse("config"), Cmd::Config);
@@ -52,6 +55,7 @@ mod tests {
         assert_eq!(parse("remote"), Cmd::Remote);
         assert_eq!(parse("w"), Cmd::Write);
         assert_eq!(parse("wr"), Cmd::WriteRepo);
+        assert_eq!(parse("reload"), Cmd::Reload);
     }
 
     #[test]
@@ -91,7 +95,8 @@ mod tests {
                 Cmd::Board,
                 Cmd::Remote,
                 Cmd::Write,
-                Cmd::WriteRepo
+                Cmd::WriteRepo,
+                Cmd::Reload
             ]
         );
         assert!(

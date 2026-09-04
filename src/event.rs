@@ -6,13 +6,14 @@ use tokio::sync::mpsc;
 
 use crate::app::{App, FetchRequest};
 use crate::atlassian::{self, AtlassianError, JiraProject};
-use crate::github::{self, GithubError, Project};
+use crate::github::{self, Board, GithubError, Project};
 
 /// Results other tasks send to the loop.
 #[derive(Debug)]
 pub enum Message {
     GithubProjects(Result<Vec<Project>, GithubError>),
     JiraProjects(Result<Vec<JiraProject>, AtlassianError>),
+    Board(Result<Board, GithubError>),
 }
 
 /// Performs one fetch and sends its outcome; a dropped receiver ends it silently.
@@ -28,6 +29,11 @@ pub async fn dispatch(request: FetchRequest, client: reqwest::Client, tx: mpsc::
         } => Message::JiraProjects(
             atlassian::projects::list_projects(&client, &base_url, &email, &token).await,
         ),
+        FetchRequest::Board {
+            token,
+            owner,
+            number,
+        } => Message::Board(github::board::load_board(&client, &token, &owner, number).await),
     };
     let _ = tx.send(message).await;
 }

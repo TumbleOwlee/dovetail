@@ -25,6 +25,8 @@ pub enum GithubError {
     Graphql(String),
     #[error("github: owner not found")]
     MissingOwner,
+    #[error("github: project not found")]
+    MissingProject,
     #[error("github: {0}")]
     Decode(String),
 }

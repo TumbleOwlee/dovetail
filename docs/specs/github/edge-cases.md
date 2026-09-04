@@ -27,3 +27,6 @@ table rows included. Cite the governing requirement inline.
 ## Known limitations — intentional constraints
 
 **GH-E-001** — Only the first 100 projects of an owner are listed; pagination is not followed. Cites GH-R-003.
+
+**GH-E-002** — Only the first 100 items, 10 labels per item and 5 assignees per item are loaded; pagination is not followed. Cites GH-R-004, GH-R-006.
+**GH-E-003** — A project without a `Status` single-select field yields one `No status` column holding every item. Cites GH-R-005, GH-R-007.
