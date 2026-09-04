@@ -33,9 +33,10 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 
 | ID | Condition | Behavior |
 |---|---|---|
-| **TU-E-009** | The dialog opens on a first run, no credentials stored | No request is made; project fields are plain inputs; cites TU-R-038, TU-R-039 |
+| **TU-E-009** | The `config` command runs with no stored credentials, first run included | No request is made and the dialog opens at once with plain project inputs; cites TU-R-038, TU-R-039 |
 | **TU-E-010** | The kind selection is changed after the list loaded | The loaded selection belongs to the kind it was fetched for and reappears with it; the other kind's field is a plain input; cites TU-R-042 |
 | **TU-E-012** | The remote kind changes away from GitHub while the board is GitHub | The remote section's own fields appear with whatever they held before; switching back hides them again; cites TU-R-045, TU-E-001 |
 | **TU-E-013** | Stored settings hold differing GitHub owner or repository values in the two sections | The Task Board's values fill the shared fields; confirming writes them to both sections; cites TU-R-046 |
 | **TU-E-014** | Ctrl+T followed by a digit with no tab of that index | The prefix is disarmed and the active tab is unchanged; cites TU-R-021, TU-R-047 |
-| **TU-E-011** | A response arrives after the dialog was closed | It is discarded; cites TU-R-038 |
+| **TU-E-011** | A response arrives while no dialog is waiting for it | It is discarded; cites TU-R-038 |
+| **TU-E-015** | A key is pressed while a request is outstanding | The main view handles it as usual; a second `config` command replaces the waiting dialog and issues a new request; cites TU-R-040 |

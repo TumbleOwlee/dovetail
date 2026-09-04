@@ -41,6 +41,8 @@ pub struct App {
     pub dialog: Option<ConfigDialog>,
     pub command_line: CommandLine,
     pending_fetches: Vec<FetchRequest>,
+    /// A dialog built by `config` that opens once its project list arrives.
+    waiting_dialog: Option<ConfigDialog>,
     /// Ctrl+T was pressed; the next key selects a tab.
     tab_prefix: bool,
     quit: bool,
@@ -68,6 +70,7 @@ impl App {
             dialog,
             command_line: CommandLine::new(),
             pending_fetches: Vec::new(),
+            waiting_dialog: None,
             tab_prefix: false,
             quit: false,
         }
@@ -78,26 +81,25 @@ impl App {
         std::mem::take(&mut self.pending_fetches)
     }
 
-    /// A fetch outcome; ignored when no dialog is open.
+    /// A fetch outcome: opens the waiting dialog with the list, or reports the failure.
+    /// Ignored when no dialog is waiting.
     pub fn handle_message(&mut self, message: Message) {
-        let Some(dialog) = self.dialog.as_mut() else {
+        let Some(mut dialog) = self.waiting_dialog.take() else {
             return;
         };
-        match message {
-            Message::GithubProjects(Ok(projects)) => dialog.set_options(
+        self.command_line.clear_notice();
+        let outcome = match message {
+            Message::GithubProjects(Ok(projects)) => Ok((
                 Field::BoardProject,
                 projects
                     .into_iter()
                     .map(|p| Choice {
                         value: p.number.to_string(),
-                        label: format!("{} {}", p.number, p.title),
+                        label: p.title,
                     })
-                    .collect(),
-            ),
-            Message::GithubProjects(Err(e)) => {
-                dialog.set_unavailable(Field::BoardProject, e.to_string());
-            }
-            Message::JiraProjects(Ok(projects)) => dialog.set_options(
+                    .collect::<Vec<_>>(),
+            )),
+            Message::JiraProjects(Ok(projects)) => Ok((
                 Field::JiraProjectKey,
                 projects
                     .into_iter()
@@ -105,11 +107,17 @@ impl App {
                         label: format!("{} {}", p.key, p.name),
                         value: p.key,
                     })
-                    .collect(),
-            ),
-            Message::JiraProjects(Err(e)) => {
-                dialog.set_unavailable(Field::JiraProjectKey, e.to_string());
+                    .collect::<Vec<_>>(),
+            )),
+            Message::GithubProjects(Err(e)) => Err(e.to_string()),
+            Message::JiraProjects(Err(e)) => Err(e.to_string()),
+        };
+        match outcome {
+            Ok((field, choices)) => {
+                dialog.set_options(field, choices);
+                self.dialog = Some(dialog);
             }
+            Err(message) => self.command_line.set_error(message),
         }
     }
 
@@ -219,24 +227,23 @@ impl App {
         }
     }
 
+    /// Opens the dialog at once, or queues the project fetch it must wait for.
     fn open_dialog(&mut self) {
         let Some(settings) = &self.settings else {
             self.dialog = Some(ConfigDialog::new(self.origin.as_ref()));
             return;
         };
-        let mut dialog =
-            ConfigDialog::from_settings(settings, &self.user_config, self.origin.as_ref());
+        let dialog = ConfigDialog::from_settings(settings, &self.user_config, self.origin.as_ref());
         let profile = settings
             .board
             .credentials()
             .and_then(|name| self.user_config.credentials.get(name));
-        match (&settings.board, profile) {
+        let request = match (&settings.board, profile) {
             (Board::Github { owner, .. }, Some(Profile::Github { token })) => {
-                self.pending_fetches.push(FetchRequest::GithubProjects {
+                Some(FetchRequest::GithubProjects {
                     token: token.clone(),
                     owner: owner.clone(),
-                });
-                dialog.set_loading(Field::BoardProject);
+                })
             }
             (
                 Board::Jira { .. },
@@ -245,17 +252,22 @@ impl App {
                     email,
                     token,
                 }),
-            ) => {
-                self.pending_fetches.push(FetchRequest::JiraProjects {
-                    base_url: base_url.clone(),
-                    email: email.clone(),
-                    token: token.clone(),
-                });
-                dialog.set_loading(Field::JiraProjectKey);
+            ) => Some(FetchRequest::JiraProjects {
+                base_url: base_url.clone(),
+                email: email.clone(),
+                token: token.clone(),
+            }),
+            _ => None,
+        };
+        match request {
+            Some(request) => {
+                self.pending_fetches.push(request);
+                self.waiting_dialog = Some(dialog);
+                self.command_line
+                    .set_notice("loading projects…".to_string());
             }
-            _ => {}
+            None => self.dialog = Some(dialog),
         }
-        self.dialog = Some(dialog);
     }
 
     fn confirm_dialog(&mut self, board: BoardForm, remote: RemoteForm) {
@@ -391,10 +403,6 @@ mod tests {
         key(a, KeyCode::Char(':'));
         for c in text.chars() {
             key(a, KeyCode::Char(c));
-        }
-        // A prefix match opens completion; Esc closes only the popup, the line stays open.
-        if a.command_line.suggestions_open() {
-            key(a, KeyCode::Esc);
         }
         key(a, KeyCode::Enter);
     }
@@ -552,6 +560,8 @@ mod tests {
         let t = TempDir::new("config");
         let mut a = app(&t, Some(settings()));
         command(&mut a, "config");
+        assert!(a.dialog.is_none(), "waits for the project list");
+        a.handle_message(Message::GithubProjects(Ok(Vec::new())));
         let d = a.dialog.as_ref().expect("dialog");
         assert_eq!(d.value(Field::Owner), "o");
         assert_eq!(d.value(Field::GithubToken), "t");
@@ -735,25 +745,6 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-038 — opening with a GitHub board profile queues a project fetch and marks the field.
-    fn ut_config_queues_github_fetch() {
-        let t = TempDir::new("fetchgh");
-        let mut a = app(&t, Some(settings()));
-        assert!(a.take_fetch_requests().is_empty());
-        command(&mut a, "config");
-        assert_eq!(
-            a.take_fetch_requests(),
-            vec![FetchRequest::GithubProjects {
-                token: "t".into(),
-                owner: "o".into()
-            }]
-        );
-        assert!(a.take_fetch_requests().is_empty());
-        let rows = render_rows(100, 30, |f| a.render(f));
-        assert!(rows.join("\n").contains("(loading…)"));
-    }
-
-    #[test]
     /// TU-R-039 — opening with a Jira board profile queues a Jira project fetch.
     fn ut_config_queues_jira_fetch() {
         let t = TempDir::new("fetchjira");
@@ -778,22 +769,47 @@ mod tests {
     }
 
     #[test]
-    /// TU-E-009 — no stored credentials, no fetch: first run and repository-file settings alike.
+    /// TU-R-038, TU-R-040 — a GitHub board profile queues a fetch; the dialog waits for it.
+    fn ut_config_queues_github_fetch() {
+        let t = TempDir::new("fetchgh");
+        let mut a = app(&t, Some(settings()));
+        assert!(a.take_fetch_requests().is_empty());
+        command(&mut a, "config");
+        assert_eq!(
+            a.take_fetch_requests(),
+            vec![FetchRequest::GithubProjects {
+                token: "t".into(),
+                owner: "o".into()
+            }]
+        );
+        assert!(a.take_fetch_requests().is_empty());
+        assert!(a.dialog.is_none());
+        let rows = render_rows(100, 30, |f| a.render(f));
+        assert_eq!(rows[29], "loading projects…");
+        key(&mut a, KeyCode::Char('x'));
+        let rows = render_rows(100, 30, |f| a.render(f));
+        assert_eq!(rows[29], "loading projects…");
+    }
+
+    #[test]
+    /// TU-E-009 — no stored credentials, no fetch and the dialog opens at once.
     fn ut_no_fetch_without_credentials() {
         let t = TempDir::new("nofetch");
         let mut a = app(&t, None);
         assert!(a.take_fetch_requests().is_empty());
+        assert!(a.dialog.is_some());
         let mut repo_file = settings();
         repo_file.board.set_credentials(None);
         repo_file.source = Source::RepoFile;
         let mut a = app(&t, Some(repo_file));
         command(&mut a, "config");
         assert!(a.take_fetch_requests().is_empty());
+        assert!(a.dialog.is_some());
     }
 
     #[test]
-    /// TU-R-038, TU-R-041 — outcomes reach the open dialog as options or as an error.
-    fn ut_message_updates_open_dialog() {
+    /// TU-R-038, TU-R-041 — a list opens the waiting dialog with a title-only selection; a failure shows the error instead.
+    fn ut_message_opens_or_rejects_waiting_dialog() {
         let t = TempDir::new("msg");
         let mut a = app(&t, Some(settings()));
         command(&mut a, "config");
@@ -801,21 +817,51 @@ mod tests {
             number: NonZeroU64::new(1).expect("nz"),
             title: "Roadmap".into(),
         }])));
-        let d = a.dialog.as_ref().expect("dialog");
+        let d = a.dialog.as_ref().expect("dialog opened by the list");
         assert!(d.has_selection(Field::BoardProject));
         assert_eq!(d.value(Field::BoardProject), "1");
+        let rows = render_rows(100, 30, |f| a.render(f));
+        let joined = rows.join("\n");
+        assert!(
+            joined.contains("Roadmap") && !joined.contains("1 Roadmap"),
+            "{joined}"
+        );
+        assert!(!joined.contains("loading projects"), "{joined}");
         let mut a = app(&t, Some(jira_settings()));
+        a.user_config.credentials.insert(
+            "j".into(),
+            crate::config::Profile::Jira {
+                base_url: "https://x".into(),
+                email: "e".into(),
+                token: "t".into(),
+            },
+        );
         command(&mut a, "config");
+        assert!(a.dialog.is_none(), "waits for the project list");
         a.handle_message(Message::JiraProjects(Err(
             crate::atlassian::AtlassianError::Status(401),
         )));
-        let d = a.dialog.as_ref().expect("dialog");
-        assert!(!d.has_selection(Field::JiraProjectKey));
-        assert_eq!(d.error(), Some("jira: HTTP 401"));
+        assert!(a.dialog.is_none());
+        assert_eq!(a.command_line.error(), Some("jira: HTTP 401"));
+        key(&mut a, KeyCode::Char('x'));
+        assert_eq!(a.command_line.error(), None);
     }
 
     #[test]
-    /// TU-E-011 — an outcome arriving with no dialog open is discarded.
+    /// TU-E-015 — a second `config` while waiting replaces the waiting dialog with a new request.
+    fn ut_second_config_while_waiting_requeues() {
+        let t = TempDir::new("requeue");
+        let mut a = app(&t, Some(settings()));
+        command(&mut a, "config");
+        command(&mut a, "config");
+        assert_eq!(a.take_fetch_requests().len(), 2);
+        assert!(a.dialog.is_none());
+        a.handle_message(Message::GithubProjects(Ok(Vec::new())));
+        assert!(a.dialog.is_some());
+    }
+
+    #[test]
+    /// TU-E-011 — an outcome arriving with no dialog waiting is discarded.
     fn ut_message_without_dialog_is_discarded() {
         let t = TempDir::new("late");
         let mut a = app(&t, Some(settings()));

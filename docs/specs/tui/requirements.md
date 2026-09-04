@@ -45,7 +45,7 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 ## Command line
 
 **TU-R-025** — `:` in the main view shall open the command line with an empty input and give it focus.
-**TU-R-026** — While the command line is open, it shall offer the command names starting with the typed input as completion suggestions.
+**TU-R-026** — While the command line is open, a help box listing every command with its description shall be drawn directly above the command line.
 **TU-R-027** — Enter in the command line shall execute the trimmed input as a command and close the command line.
 **TU-R-028** — Esc in the command line shall close it without executing.
 **TU-R-029** — The `q` command shall quit the application.
@@ -59,13 +59,14 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 
 ## Option lists in the configuration dialog
 
-**TU-R-038** — When the dialog opens and the board section's credentials resolve to a stored GitHub profile, the application shall request that owner's GitHub Projects and, on success, show the project field as a selection of `<number> <title>` entries instead of an input.
-**TU-R-039** — When the dialog opens and the board section's credentials resolve to a stored Jira profile, the application shall request that site's projects and, on success, show the project-key field as a selection of `<key> <name>` entries instead of an input.
-**TU-R-040** — While a request is outstanding, the field shall stay an input and its title shall end in `(loading…)`.
-**TU-R-041** — When a request fails, the field shall stay an input, its title shall end in `(list unavailable)`, and the dialog shall show the error message.
+**TU-R-038** — When the `config` command runs and the board section's credentials resolve to a stored GitHub profile, the application shall request that owner's GitHub Projects and open the dialog only once the list arrived, with the project field a selection of `<title>` entries instead of an input.
+**TU-R-039** — When the `config` command runs and the board section's credentials resolve to a stored Jira profile, the application shall request that site's projects and open the dialog only once the list arrived, with the project-key field a selection of `<key> <name>` entries instead of an input.
+**TU-R-040** — While a request is outstanding, no dialog shall be open and the command line area shall show `loading projects…`.
+**TU-R-041** — When a request fails, the dialog shall not open and the command line area shall show the error until the next key press.
 **TU-R-042** — A selection replacing an input shall start on the entry matching the field's current value, or on the first entry when the field is empty; when the field is non-empty and no entry matches, or the list is empty, the field shall stay an input keeping its value with its title ending in `(not listed)`.
 **TU-R-043** — Confirming with a selection in place shall use the selected entry's number or key as the field's value.
 **TU-R-044** — When the dialog opens without stored settings, the board kind selection shall start on GitHub and the remote kind selection shall start on the `origin` remote's host when that host is GitHub or Bitbucket, GitHub otherwise.
 **TU-R-045** — When both sections have kind GitHub, the Git Remote section shall show no owner, repository or token fields, and confirming shall use the Task Board section's owner, repository and token for the remote section.
 **TU-R-046** — The owner, repository and GitHub token fields shall each be a single value shared by the Task Board and Git Remote sections: whichever section shows the field edits the same value, and confirming uses it for every GitHub section.
 **TU-R-047** — Ctrl+T in the main view shall arm a prefix that consumes exactly the next key; a key that is neither `h`, `l` nor a digit shall disarm it without any other effect.
+**TU-R-048** — While the command line is closed and no error is shown, the bottom line shall show the hint `:  command  |  C-t+h C-t+l  tabs`.

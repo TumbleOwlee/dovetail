@@ -307,8 +307,6 @@ impl ToLabel for Choice {
 /// Whether a list-backed field currently shows its input or a fetched selection.
 enum ListState {
     Idle,
-    Loading,
-    Unavailable,
     NotListed,
     Loaded(ChoiceWidget),
 }
@@ -353,23 +351,6 @@ impl ConfigDialog {
         }
         dialog.set_focus(Slot::BoardKind);
         dialog
-    }
-
-    /// Marks a list-backed field as waiting for its options.
-    pub fn set_loading(&mut self, field: Field) {
-        if let Some(i) = field.list_index() {
-            self.lists[i] = ListState::Loading;
-            self.set_title_suffix(field, " (loading…)");
-        }
-    }
-
-    /// Records a failed fetch: the field stays an input and the error is shown.
-    pub fn set_unavailable(&mut self, field: Field, error: String) {
-        if let Some(i) = field.list_index() {
-            self.lists[i] = ListState::Unavailable;
-            self.set_title_suffix(field, " (list unavailable)");
-            self.error = Some(error);
-        }
     }
 
     /// Replaces the field's input with a selection when its value is listed or empty.
@@ -1286,32 +1267,6 @@ mod tests {
         );
         assert_eq!(ConfigDialog::new(None).remote_kind(), RemoteKind::Github);
         assert_eq!(ConfigDialog::new(Some(&bb)).board_kind(), BoardKind::Github);
-    }
-
-    #[test]
-    /// TU-R-040 — a loading field stays an input with `(loading…)` in its title.
-    fn ut_loading_field_is_input_with_suffix() {
-        let mut d = ConfigDialog::new(None);
-        d.set_loading(Field::BoardProject);
-        assert!(!d.has_selection(Field::BoardProject));
-        let rows = crate::testkit::render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
-        assert!(rows.join("\n").contains("Project number (loading…)"));
-    }
-
-    #[test]
-    /// TU-R-041 — a failed fetch keeps the input, marks the title and shows the error.
-    fn ut_unavailable_field_shows_error() {
-        let mut d = ConfigDialog::new(None);
-        d.set_loading(Field::BoardProject);
-        d.set_unavailable(Field::BoardProject, "github: HTTP 401".into());
-        assert!(!d.has_selection(Field::BoardProject));
-        assert_eq!(d.error(), Some("github: HTTP 401"));
-        let rows = crate::testkit::render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
-        let joined = rows.join("\n");
-        assert!(
-            joined.contains("Project number (list unavailable)") && joined.contains("HTTP 401"),
-            "{joined}"
-        );
     }
 
     #[test]

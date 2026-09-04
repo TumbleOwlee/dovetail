@@ -1,7 +1,5 @@
-//! The `:` command line's vocabulary: parsing typed text into a [`Cmd`] and completing
-//! command names.
-
-use ferrowl_ui::traits::{Suggestion, SuggestionProvider};
+//! The `:` command line's vocabulary: parsing typed text into a [`Cmd`] and the help rows
+//! advertising it.
 
 /// A parsed command-line entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,8 +15,15 @@ pub enum Cmd {
     Unknown(String),
 }
 
-/// Every command name, in the order suggestions list them.
-pub const NAMES: [&str; 6] = ["board", "config", "q", "remote", "w", "wr"];
+/// Usage and description of every command, in the order the help box lists them.
+pub const HELP: [(&str, &str); 6] = [
+    (":q", "quit"),
+    (":config", "open the configuration dialog"),
+    (":board", "show the Task Board tab"),
+    (":remote", "show the Git Remote tab"),
+    (":w", "write the settings to the user-level config"),
+    (":wr", "write .prodgy.toml (credentials stripped)"),
+];
 
 /// Parses trimmed input into a command; unknown text keeps its trimmed form.
 pub fn parse(input: &str) -> Cmd {
@@ -31,27 +36,6 @@ pub fn parse(input: &str) -> Cmd {
         "w" => Cmd::Write,
         "wr" => Cmd::WriteRepo,
         other => Cmd::Unknown(other.to_string()),
-    }
-}
-
-/// Completes command names by prefix.
-#[derive(Debug, Clone, Default)]
-pub struct CommandProvider;
-
-impl SuggestionProvider for CommandProvider {
-    fn suggest(&self, input: &str) -> Vec<Suggestion> {
-        if input.is_empty() {
-            return Vec::new();
-        }
-        NAMES
-            .iter()
-            .filter(|name| name.starts_with(input))
-            .map(|name| Suggestion {
-                value: name.to_string(),
-                label: name.to_string(),
-                partial: false,
-            })
-            .collect()
     }
 }
 
@@ -85,23 +69,34 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-026 — suggestions are the names starting with the input, none for an empty input.
-    fn ut_suggest_by_prefix() {
-        let p = CommandProvider;
-        let values = |s: &str| {
-            p.suggest(s)
-                .into_iter()
-                .map(|s| s.value)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(values("w"), vec!["w", "wr"]);
-        assert_eq!(values("co"), vec!["config"]);
-        assert_eq!(values("z"), Vec::<String>::new());
-        assert_eq!(values(""), Vec::<String>::new());
+    /// TU-R-026 — every command has a help row, and every help row parses to a command.
+    fn ut_help_rows_cover_every_command() {
+        let parsed: Vec<Cmd> = HELP
+            .iter()
+            .map(|(usage, _)| {
+                parse(
+                    usage
+                        .trim_start_matches(':')
+                        .split(' ')
+                        .next()
+                        .unwrap_or(""),
+                )
+            })
+            .collect();
+        assert_eq!(
+            parsed,
+            vec![
+                Cmd::Quit,
+                Cmd::Config,
+                Cmd::Board,
+                Cmd::Remote,
+                Cmd::Write,
+                Cmd::WriteRepo
+            ]
+        );
         assert!(
-            p.suggest("b")
-                .iter()
-                .all(|s| !s.partial && s.label == s.value)
+            HELP.iter()
+                .all(|(usage, desc)| usage.starts_with(':') && !desc.is_empty())
         );
     }
 }
