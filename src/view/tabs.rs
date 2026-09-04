@@ -39,10 +39,15 @@ impl Tab {
         Tab::ALL[(i + Tab::ALL.len() - 1) % Tab::ALL.len()]
     }
 
-    /// `<title> [<Kind>]`, `[-]` without settings.
+    /// Zero-based position in the tab line.
+    pub fn index(self) -> usize {
+        Tab::ALL.iter().position(|t| *t == self).unwrap_or(0)
+    }
+
+    /// ` [<index>] <title> [<Kind>] `, `[-]` without settings.
     pub fn label(self, settings: Option<&Settings>) -> String {
         let kind = settings.map_or("-", |s| kind_label(self.section(s).kind()));
-        format!("{} [{kind}]", self.title())
+        format!(" [{}] {} [{kind}] ", self.index(), self.title())
     }
 
     pub fn section(self, settings: &Settings) -> &dyn Section {
@@ -150,13 +155,13 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-019 — labels carry the configured kind in brackets, `[-]` without settings.
+    /// TU-R-019 — labels are padded, indexed, and carry the configured kind in brackets, `[-]` without settings.
     fn ut_tab_labels_show_kind() {
         let s = settings();
-        assert_eq!(Tab::Board.label(Some(&s)), "Task Board [Jira]");
-        assert_eq!(Tab::Remote.label(Some(&s)), "Git Remote [GitHub]");
-        assert_eq!(Tab::Board.label(None), "Task Board [-]");
-        assert_eq!(Tab::Remote.label(None), "Git Remote [-]");
+        assert_eq!(Tab::Board.label(Some(&s)), " [0] Task Board [Jira] ");
+        assert_eq!(Tab::Remote.label(Some(&s)), " [1] Git Remote [GitHub] ");
+        assert_eq!(Tab::Board.label(None), " [0] Task Board [-] ");
+        assert_eq!(Tab::Remote.label(None), " [1] Git Remote [-] ");
         assert_eq!(kind_label(Kind::Bitbucket), "Bitbucket");
     }
 
@@ -209,8 +214,10 @@ mod tests {
         let rows = crate::testkit::render_rows(60, 1, |f| {
             render_tab_line(f.area(), f.buffer_mut(), Tab::Remote, Some(&s));
         });
-        let board = rows[0].find("Task Board [Jira]").expect("board label");
-        let remote = rows[0].find("Git Remote [GitHub]").expect("remote label");
+        let board = rows[0].find("[0] Task Board [Jira]").expect("board label");
+        let remote = rows[0]
+            .find("[1] Git Remote [GitHub]")
+            .expect("remote label");
         assert!(board < remote);
     }
 

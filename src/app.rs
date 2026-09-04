@@ -41,6 +41,8 @@ pub struct App {
     pub dialog: Option<ConfigDialog>,
     pub command_line: CommandLine,
     pending_fetches: Vec<FetchRequest>,
+    /// Ctrl+T was pressed; the next key selects a tab.
+    tab_prefix: bool,
     quit: bool,
 }
 
@@ -66,6 +68,7 @@ impl App {
             dialog,
             command_line: CommandLine::new(),
             pending_fetches: Vec::new(),
+            tab_prefix: false,
             quit: false,
         }
     }
@@ -145,11 +148,21 @@ impl App {
             }
             return;
         }
+        if std::mem::take(&mut self.tab_prefix) {
+            match code {
+                KeyCode::Char('l') => self.active_tab = self.active_tab.next(),
+                KeyCode::Char('h') => self.active_tab = self.active_tab.previous(),
+                KeyCode::Char(c) => {
+                    if let Some(tab) = c.to_digit(10).and_then(|n| Tab::ALL.get(n as usize)) {
+                        self.active_tab = *tab;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         match (modifiers, code) {
-            (KeyModifiers::NONE, KeyCode::Tab) => self.active_tab = self.active_tab.next(),
-            (_, KeyCode::BackTab) => self.active_tab = self.active_tab.previous(),
-            (KeyModifiers::NONE, KeyCode::Char('1')) => self.active_tab = Tab::Board,
-            (KeyModifiers::NONE, KeyCode::Char('2')) => self.active_tab = Tab::Remote,
+            (KeyModifiers::CONTROL, KeyCode::Char('t')) => self.tab_prefix = true,
             (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(':')) => {
                 self.command_line.open();
             }
@@ -401,21 +414,62 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-020, TU-R-021 — Tab, Shift+Tab, 1 and 2 switch tabs.
+    /// TU-R-020, TU-R-021 — Ctrl+T then l/h or a digit switches tabs; bare keys do nothing.
     fn ut_tab_keys_switch_tabs() {
         let t = TempDir::new("tabs");
         let mut a = app(&t, Some(settings()));
+        let ctrl_t = |a: &mut App| a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
         assert_eq!(a.active_tab, Tab::Board);
-        key(&mut a, KeyCode::Tab);
+        ctrl_t(&mut a);
+        key(&mut a, KeyCode::Char('l'));
         assert_eq!(a.active_tab, Tab::Remote);
-        key(&mut a, KeyCode::Tab);
+        ctrl_t(&mut a);
+        key(&mut a, KeyCode::Char('l'));
         assert_eq!(a.active_tab, Tab::Board);
-        key(&mut a, KeyCode::BackTab);
+        ctrl_t(&mut a);
+        key(&mut a, KeyCode::Char('h'));
         assert_eq!(a.active_tab, Tab::Remote);
+        ctrl_t(&mut a);
+        key(&mut a, KeyCode::Char('0'));
+        assert_eq!(a.active_tab, Tab::Board);
+        ctrl_t(&mut a);
         key(&mut a, KeyCode::Char('1'));
-        assert_eq!(a.active_tab, Tab::Board);
-        key(&mut a, KeyCode::Char('2'));
         assert_eq!(a.active_tab, Tab::Remote);
+        for code in [
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Char('0'),
+            KeyCode::Char('h'),
+        ] {
+            key(&mut a, code);
+            assert_eq!(
+                a.active_tab,
+                Tab::Remote,
+                "{code:?} must not switch without the prefix"
+            );
+        }
+    }
+
+    #[test]
+    /// TU-R-047, TU-E-014 — the prefix consumes exactly one key; a foreign key or a bad index disarms it.
+    fn ut_tab_prefix_disarms() {
+        let t = TempDir::new("prefix");
+        let mut a = app(&t, Some(settings()));
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        key(&mut a, KeyCode::Char('x'));
+        key(&mut a, KeyCode::Char('l'));
+        assert_eq!(a.active_tab, Tab::Board);
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        key(&mut a, KeyCode::Char('9'));
+        assert_eq!(a.active_tab, Tab::Board);
+        key(&mut a, KeyCode::Char('l'));
+        assert_eq!(a.active_tab, Tab::Board);
+        // The prefix does not swallow the command line either: `:` after a foreign key opens it.
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        key(&mut a, KeyCode::Char(':'));
+        assert!(!a.command_line.is_open());
+        key(&mut a, KeyCode::Char(':'));
+        assert!(a.command_line.is_open());
     }
 
     #[test]
@@ -630,7 +684,7 @@ mod tests {
         let mut a = app(&t, Some(settings()));
         command(&mut a, "frob");
         let rows = render_rows(60, 10, |f| a.render(f));
-        assert!(rows[0].contains("Task Board [GitHub]"), "{}", rows[0]);
+        assert!(rows[0].contains("[0] Task Board [GitHub]"), "{}", rows[0]);
         assert_eq!(rows[1], "kind: github");
         assert_eq!(rows[9], "unknown command: frob");
         key(&mut a, KeyCode::Char(':'));
@@ -645,7 +699,7 @@ mod tests {
         let mut a = app(&t, None);
         let rows = render_rows(100, 30, |f| a.render(f));
         let joined = rows.join("\n");
-        assert!(joined.contains("Task Board [-]"), "{joined}");
+        assert!(joined.contains("[0] Task Board [-]"), "{joined}");
         assert!(joined.contains("Owner"), "{joined}");
     }
 

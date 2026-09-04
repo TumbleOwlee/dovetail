@@ -35,9 +35,9 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 ## Main view
 
 **TU-R-018** — The main view shall consist of a tab line at the top, the active tab's body filling the middle, and the command line occupying the bottom line.
-**TU-R-019** — The tab line shall list the tabs Task Board and Git Remote in that order, each labelled with its configured kind in brackets, as in `Task Board [Jira]`, and with `[-]` when no settings are held.
-**TU-R-020** — Tab shall activate the next tab and Shift+Tab the previous, wrapping at both ends.
-**TU-R-021** — The keys `1` and `2` shall activate the Task Board and Git Remote tab respectively.
+**TU-R-019** — The tab line shall list the tabs Task Board and Git Remote in that order, each labelled ` [<index>] <title> [<Kind>] ` with a leading and trailing space and a zero-based index, as in ` [0] Task Board [Jira] `, and with `[-]` when no settings are held.
+**TU-R-020** — Ctrl+T followed by `l` shall activate the next tab and Ctrl+T followed by `h` the previous, wrapping at both ends.
+**TU-R-021** — Ctrl+T followed by a digit shall activate the tab with that zero-based index.
 **TU-R-022** — The Task Board tab body shall show the board section's kind, each identifier key with its value, the referenced profile name or `none`, and `present` or `missing` for credentials.
 **TU-R-023** — The Git Remote tab body shall show the remote section's kind, each identifier key with its value, the referenced profile name or `none`, and `present` or `missing` for credentials.
 **TU-R-024** — With no repository settings, a tab body shall show a single line stating that the repository is not configured and naming the `config` command.
@@ -68,3 +68,4 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **TU-R-044** — When the dialog opens without stored settings, the board kind selection shall start on GitHub and the remote kind selection shall start on the `origin` remote's host when that host is GitHub or Bitbucket, GitHub otherwise.
 **TU-R-045** — When both sections have kind GitHub, the Git Remote section shall show no owner, repository or token fields, and confirming shall use the Task Board section's owner, repository and token for the remote section.
 **TU-R-046** — The owner, repository and GitHub token fields shall each be a single value shared by the Task Board and Git Remote sections: whichever section shows the field edits the same value, and confirming uses it for every GitHub section.
+**TU-R-047** — Ctrl+T in the main view shall arm a prefix that consumes exactly the next key; a key that is neither `h`, `l` nor a digit shall disarm it without any other effect.
