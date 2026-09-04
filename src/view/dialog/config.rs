@@ -55,17 +55,17 @@ impl ToLabel for RemoteKind {
 /// One input field of the dialog. Order is display order within its section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
-    BoardOwner,
-    BoardRepo,
+    /// Shared by every GitHub section.
+    Owner,
+    /// Shared by every GitHub section.
+    Repo,
     BoardProject,
-    BoardToken,
+    /// Shared by every GitHub section.
+    GithubToken,
     JiraBaseUrl,
     JiraEmail,
     JiraToken,
     JiraProjectKey,
-    RemoteOwner,
-    RemoteRepo,
-    RemoteToken,
     BbWorkspace,
     BbRepo,
     BbUsername,
@@ -73,18 +73,15 @@ pub enum Field {
 }
 
 impl Field {
-    pub const ALL: [Field; 15] = [
-        Field::BoardOwner,
-        Field::BoardRepo,
+    pub const ALL: [Field; 12] = [
+        Field::Owner,
+        Field::Repo,
         Field::BoardProject,
-        Field::BoardToken,
+        Field::GithubToken,
         Field::JiraBaseUrl,
         Field::JiraEmail,
         Field::JiraToken,
         Field::JiraProjectKey,
-        Field::RemoteOwner,
-        Field::RemoteRepo,
-        Field::RemoteToken,
         Field::BbWorkspace,
         Field::BbRepo,
         Field::BbUsername,
@@ -93,10 +90,10 @@ impl Field {
 
     pub fn title(self) -> &'static str {
         match self {
-            Field::BoardOwner | Field::RemoteOwner => "Owner",
-            Field::BoardRepo | Field::RemoteRepo => "Repository",
+            Field::Owner => "Owner",
+            Field::Repo => "Repository",
             Field::BoardProject => "Project number",
-            Field::BoardToken | Field::RemoteToken => "Token",
+            Field::GithubToken => "Token",
             Field::JiraBaseUrl => "Base URL",
             Field::JiraEmail => "Email",
             Field::JiraToken => "API token",
@@ -127,10 +124,10 @@ impl Field {
     fn for_board(kind: BoardKind) -> &'static [Field] {
         match kind {
             BoardKind::Github => &[
-                Field::BoardOwner,
-                Field::BoardRepo,
+                Field::Owner,
+                Field::Repo,
                 Field::BoardProject,
-                Field::BoardToken,
+                Field::GithubToken,
             ],
             BoardKind::Jira => &[
                 Field::JiraBaseUrl,
@@ -145,7 +142,7 @@ impl Field {
     fn for_remote(kind: RemoteKind, shared: bool) -> &'static [Field] {
         match kind {
             RemoteKind::Github if shared => &[],
-            RemoteKind::Github => &[Field::RemoteOwner, Field::RemoteRepo, Field::RemoteToken],
+            RemoteKind::Github => &[Field::Owner, Field::Repo, Field::GithubToken],
             RemoteKind::Bitbucket => &[
                 Field::BbWorkspace,
                 Field::BbRepo,
@@ -158,8 +155,8 @@ impl Field {
     /// The origin-derived hint for this field, when the origin's host matches the field's kind.
     fn hint(self, origin: &Origin) -> Option<&str> {
         match (self, origin.host) {
-            (Field::BoardOwner | Field::RemoteOwner, Kind::Github) => Some(&origin.owner),
-            (Field::BoardRepo | Field::RemoteRepo, Kind::Github) => Some(&origin.repo),
+            (Field::Owner, Kind::Github) => Some(&origin.owner),
+            (Field::Repo, Kind::Github) => Some(&origin.repo),
             (Field::BbWorkspace, Kind::Bitbucket) => Some(&origin.owner),
             (Field::BbRepo, Kind::Bitbucket) => Some(&origin.repo),
             _ => None,
@@ -445,11 +442,11 @@ impl ConfigDialog {
                 ..
             } => {
                 dialog.board_kind.state.set_selection(0);
-                dialog.set_value(Field::BoardOwner, owner);
-                dialog.set_value(Field::BoardRepo, repo);
+                dialog.set_value(Field::Owner, owner);
+                dialog.set_value(Field::Repo, repo);
                 dialog.set_value(Field::BoardProject, &project.to_string());
                 if let Some(Profile::Github { token }) = profile(&settings.board) {
-                    dialog.set_value(Field::BoardToken, token);
+                    dialog.set_value(Field::GithubToken, token);
                 }
             }
             Board::Jira { project_key, .. } => {
@@ -470,10 +467,13 @@ impl ConfigDialog {
         match &settings.remote {
             Remote::Github { owner, repo, .. } => {
                 dialog.remote_kind.state.set_selection(0);
-                dialog.set_value(Field::RemoteOwner, owner);
-                dialog.set_value(Field::RemoteRepo, repo);
-                if let Some(Profile::Github { token }) = profile(&settings.remote) {
-                    dialog.set_value(Field::RemoteToken, token);
+                // The shared fields already hold the board's values when it is GitHub too.
+                if !matches!(settings.board, Board::Github { .. }) {
+                    dialog.set_value(Field::Owner, owner);
+                    dialog.set_value(Field::Repo, repo);
+                    if let Some(Profile::Github { token }) = profile(&settings.remote) {
+                        dialog.set_value(Field::GithubToken, token);
+                    }
                 }
             }
             Remote::Bitbucket {
@@ -726,8 +726,8 @@ impl ConfigDialog {
         };
         let board = match self.board_kind() {
             BoardKind::Github => {
-                let owner = need(Field::BoardOwner)?;
-                let repo = need(Field::BoardRepo)?;
+                let owner = need(Field::Owner)?;
+                let repo = need(Field::Repo)?;
                 let project = need(Field::BoardProject)?
                     .parse::<NonZeroU64>()
                     .map_err(|_| {
@@ -736,7 +736,7 @@ impl ConfigDialog {
                             "Project number must be a positive integer".to_string(),
                         )
                     })?;
-                let token = need(Field::BoardToken)?;
+                let token = need(Field::GithubToken)?;
                 BoardForm::Github {
                     owner,
                     repo,
@@ -752,19 +752,10 @@ impl ConfigDialog {
             },
         };
         let remote = match self.remote_kind() {
-            RemoteKind::Github => match &board {
-                BoardForm::Github {
-                    owner, repo, token, ..
-                } => RemoteForm::Github {
-                    owner: owner.clone(),
-                    repo: repo.clone(),
-                    token: token.clone(),
-                },
-                BoardForm::Jira { .. } => RemoteForm::Github {
-                    owner: need(Field::RemoteOwner)?,
-                    repo: need(Field::RemoteRepo)?,
-                    token: need(Field::RemoteToken)?,
-                },
+            RemoteKind::Github => RemoteForm::Github {
+                owner: need(Field::Owner)?,
+                repo: need(Field::Repo)?,
+                token: need(Field::GithubToken)?,
             },
             RemoteKind::Bitbucket => RemoteForm::Bitbucket {
                 workspace: need(Field::BbWorkspace)?,
@@ -880,10 +871,10 @@ mod tests {
             d.visible_slots(),
             vec![
                 Slot::BoardKind,
-                Slot::Input(Field::BoardOwner),
-                Slot::Input(Field::BoardRepo),
+                Slot::Input(Field::Owner),
+                Slot::Input(Field::Repo),
                 Slot::Input(Field::BoardProject),
-                Slot::Input(Field::BoardToken),
+                Slot::Input(Field::GithubToken),
                 Slot::RemoteKind,
             ]
         );
@@ -892,9 +883,9 @@ mod tests {
             &d.visible_slots()[5..],
             &[
                 Slot::RemoteKind,
-                Slot::Input(Field::RemoteOwner),
-                Slot::Input(Field::RemoteRepo),
-                Slot::Input(Field::RemoteToken),
+                Slot::Input(Field::Owner),
+                Slot::Input(Field::Repo),
+                Slot::Input(Field::GithubToken),
             ]
         );
         assert_eq!(d.board_kind(), BoardKind::Jira);
@@ -948,10 +939,10 @@ mod tests {
     fn ut_origin_placeholders_for_matching_kind() {
         let o = github_origin();
         let d = ConfigDialog::new(Some(&o));
-        assert_eq!(d.placeholder(Field::BoardOwner), Some("TumbleOwlee"));
-        assert_eq!(d.placeholder(Field::BoardRepo), Some("prodgy"));
-        assert_eq!(d.placeholder(Field::RemoteOwner), Some("TumbleOwlee"));
-        assert_eq!(d.placeholder(Field::RemoteRepo), Some("prodgy"));
+        assert_eq!(d.placeholder(Field::Owner), Some("TumbleOwlee"));
+        assert_eq!(d.placeholder(Field::Repo), Some("prodgy"));
+        assert_eq!(d.placeholder(Field::Owner), Some("TumbleOwlee"));
+        assert_eq!(d.placeholder(Field::Repo), Some("prodgy"));
         assert_eq!(d.placeholder(Field::BbWorkspace), None);
         let bb = Origin {
             host: Kind::Bitbucket,
@@ -959,7 +950,7 @@ mod tests {
             repo: "svc".into(),
         };
         let d = ConfigDialog::new(Some(&bb));
-        assert_eq!(d.placeholder(Field::BoardOwner), None);
+        assert_eq!(d.placeholder(Field::Owner), None);
         assert_eq!(d.placeholder(Field::BbWorkspace), Some("acme"));
         assert_eq!(d.placeholder(Field::BbRepo), Some("svc"));
     }
@@ -977,12 +968,12 @@ mod tests {
         let o = github_origin();
         let mut d = ConfigDialog::new(Some(&o));
         tab(&mut d);
-        assert_eq!(d.focus(), Slot::Input(Field::BoardOwner));
+        assert_eq!(d.focus(), Slot::Input(Field::Owner));
         assert_eq!(
             d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('f')),
             DialogEvent::Consumed
         );
-        assert_eq!(d.value(Field::BoardOwner), "TumbleOwlee");
+        assert_eq!(d.value(Field::Owner), "TumbleOwlee");
     }
 
     #[test]
@@ -1015,7 +1006,7 @@ mod tests {
     fn ut_enter_focuses_first_empty_field() {
         let mut d = ConfigDialog::new(None);
         assert_eq!(key(&mut d, KeyCode::Enter), DialogEvent::Consumed);
-        assert_eq!(d.focus(), Slot::Input(Field::BoardOwner));
+        assert_eq!(d.focus(), Slot::Input(Field::Owner));
         assert!(d.error().is_some());
         type_str(&mut d, "o");
         tab(&mut d);
@@ -1056,13 +1047,21 @@ mod tests {
     /// TU-E-001 — values typed under one kind survive switching away and back.
     fn ut_hidden_fields_keep_values() {
         let mut d = ConfigDialog::new(None);
-        tab(&mut d);
-        type_str(&mut d, "keep");
-        key(&mut d, KeyCode::BackTab);
+        for _ in 0..3 {
+            tab(&mut d);
+        }
+        assert_eq!(d.focus(), Slot::Input(Field::BoardProject));
+        type_str(&mut d, "42");
+        for _ in 0..3 {
+            key(&mut d, KeyCode::BackTab);
+        }
         key(&mut d, KeyCode::Down); // Jira
-        assert!(!d.visible_slots().contains(&Slot::Input(Field::BoardOwner)));
+        assert!(
+            !d.visible_slots()
+                .contains(&Slot::Input(Field::BoardProject))
+        );
         key(&mut d, KeyCode::Down); // GitHub again
-        assert_eq!(d.value(Field::BoardOwner), "keep");
+        assert_eq!(d.value(Field::BoardProject), "42");
     }
 
     #[test]
@@ -1132,10 +1131,10 @@ mod tests {
             source: Source::RepoFile,
         };
         let d = ConfigDialog::from_settings(&settings, &UserConfig::default(), None);
-        assert_eq!(d.value(Field::BoardOwner), "o");
+        assert_eq!(d.value(Field::Owner), "o");
         assert_eq!(d.value(Field::BoardProject), "5");
-        assert_eq!(d.value(Field::BoardToken), "");
-        assert_eq!(d.value(Field::RemoteToken), "");
+        assert_eq!(d.value(Field::GithubToken), "");
+        assert_eq!(d.value(Field::GithubToken), "");
     }
 
     #[test]
@@ -1392,16 +1391,84 @@ mod tests {
     fn ut_shared_github_fields_asked_once() {
         let mut d = ConfigDialog::new(None);
         fill_github(&mut d);
-        assert!(!d.visible_slots().contains(&Slot::Input(Field::RemoteOwner)));
+        let owner_slots = |d: &ConfigDialog| {
+            d.visible_slots()
+                .iter()
+                .filter(|s| **s == Slot::Input(Field::Owner))
+                .count()
+        };
+        assert_eq!(owner_slots(&d), 1);
+        assert_eq!(d.visible_slots().len(), 6);
         let rows = crate::testkit::render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
         assert_eq!(rows.join("\n").matches("Owner").count(), 1);
         key(&mut d, KeyCode::Down); // remote -> Bitbucket
         assert!(d.visible_slots().contains(&Slot::Input(Field::BbWorkspace)));
         key(&mut d, KeyCode::Down); // back to GitHub
-        assert!(!d.visible_slots().contains(&Slot::Input(Field::RemoteOwner)));
+        assert_eq!(d.visible_slots().len(), 6);
         // Board Jira with remote GitHub: the remote asks for its own values.
         let mut d = ConfigDialog::new(None);
         key(&mut d, KeyCode::Down);
-        assert!(d.visible_slots().contains(&Slot::Input(Field::RemoteOwner)));
+        assert!(d.visible_slots().contains(&Slot::Input(Field::Owner)));
+    }
+
+    #[test]
+    /// TU-R-046 — the owner, repository and token are one value however they are reached.
+    fn ut_owner_repo_token_share_one_state() {
+        let mut d = ConfigDialog::new(None);
+        key(&mut d, KeyCode::Down); // board Jira: the remote shows its GitHub fields
+        for _ in 0..6 {
+            tab(&mut d);
+        }
+        assert_eq!(d.focus(), Slot::Input(Field::Owner));
+        type_str(&mut d, "own");
+        for _ in 0..6 {
+            key(&mut d, KeyCode::BackTab);
+        }
+        key(&mut d, KeyCode::Down); // board GitHub again
+        assert_eq!(d.value(Field::Owner), "own");
+        assert_eq!(
+            d.visible_slots()
+                .iter()
+                .filter(|s| **s == Slot::Input(Field::Owner))
+                .count(),
+            1
+        );
+        assert_eq!(Field::ALL.len(), 12);
+    }
+
+    #[test]
+    /// TU-E-013 — differing stored GitHub values: the board's fill the shared fields.
+    fn ut_from_settings_board_wins_shared_fields() {
+        let settings = Settings {
+            board: Board::Github {
+                credentials: None,
+                owner: "board-owner".into(),
+                repo: "board-repo".into(),
+                project: NonZeroU64::new(5).expect("nz"),
+            },
+            remote: Remote::Github {
+                credentials: None,
+                owner: "other".into(),
+                repo: "other".into(),
+            },
+            source: Source::RepoFile,
+        };
+        let d = ConfigDialog::from_settings(&settings, &UserConfig::default(), None);
+        assert_eq!(d.value(Field::Owner), "board-owner");
+        assert_eq!(d.value(Field::Repo), "board-repo");
+        let jira = Settings {
+            board: Board::Jira {
+                credentials: None,
+                project_key: "K".into(),
+            },
+            remote: Remote::Github {
+                credentials: None,
+                owner: "ro".into(),
+                repo: "rr".into(),
+            },
+            source: Source::RepoFile,
+        };
+        let d = ConfigDialog::from_settings(&jira, &UserConfig::default(), None);
+        assert_eq!(d.value(Field::Owner), "ro");
     }
 }

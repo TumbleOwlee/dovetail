@@ -67,3 +67,4 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **TU-R-043** — Confirming with a selection in place shall use the selected entry's number or key as the field's value.
 **TU-R-044** — When the dialog opens without stored settings, the board kind selection shall start on GitHub and the remote kind selection shall start on the `origin` remote's host when that host is GitHub or Bitbucket, GitHub otherwise.
 **TU-R-045** — When both sections have kind GitHub, the Git Remote section shall show no owner, repository or token fields, and confirming shall use the Task Board section's owner, repository and token for the remote section.
+**TU-R-046** — The owner, repository and GitHub token fields shall each be a single value shared by the Task Board and Git Remote sections: whichever section shows the field edits the same value, and confirming uses it for every GitHub section.

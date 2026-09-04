@@ -468,7 +468,7 @@ mod tests {
         assert_eq!(a.active_tab, Tab::Board);
         assert_eq!(
             a.dialog.as_ref().map(|d| d.focus()),
-            Some(Slot::Input(Field::BoardOwner))
+            Some(Slot::Input(Field::Owner))
         );
     }
 
@@ -499,8 +499,8 @@ mod tests {
         let mut a = app(&t, Some(settings()));
         command(&mut a, "config");
         let d = a.dialog.as_ref().expect("dialog");
-        assert_eq!(d.value(Field::BoardOwner), "o");
-        assert_eq!(d.value(Field::BoardToken), "t");
+        assert_eq!(d.value(Field::Owner), "o");
+        assert_eq!(d.value(Field::GithubToken), "t");
         key(&mut a, KeyCode::Esc);
         assert!(a.dialog.is_none());
         assert!(!a.should_quit());
@@ -557,13 +557,10 @@ mod tests {
         );
         let d = a.dialog.as_mut().expect("dialog");
         for (f, v) in [
-            (Field::BoardOwner, "o"),
-            (Field::BoardRepo, "r"),
+            (Field::Owner, "o"),
+            (Field::Repo, "r"),
             (Field::BoardProject, "1"),
-            (Field::BoardToken, "t"),
-            (Field::RemoteOwner, "o"),
-            (Field::RemoteRepo, "r"),
-            (Field::RemoteToken, "t"),
+            (Field::GithubToken, "t"),
         ] {
             d.set_value(f, v);
         }

@@ -36,4 +36,5 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-009** | The dialog opens on a first run, no credentials stored | No request is made; project fields are plain inputs; cites TU-R-038, TU-R-039 |
 | **TU-E-010** | The kind selection is changed after the list loaded | The loaded selection belongs to the kind it was fetched for and reappears with it; the other kind's field is a plain input; cites TU-R-042 |
 | **TU-E-012** | The remote kind changes away from GitHub while the board is GitHub | The remote section's own fields appear with whatever they held before; switching back hides them again; cites TU-R-045, TU-E-001 |
+| **TU-E-013** | Stored settings hold differing GitHub owner or repository values in the two sections | The Task Board's values fill the shared fields; confirming writes them to both sections; cites TU-R-046 |
 | **TU-E-011** | A response arrives after the dialog was closed | It is discarded; cites TU-R-038 |
