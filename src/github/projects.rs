@@ -29,6 +29,8 @@ pub enum GithubError {
     MissingProject,
     #[error("github: issue not found")]
     MissingIssue,
+    #[error("github: repository not found")]
+    MissingRepository,
     #[error("github: {0}")]
     Decode(String),
 }

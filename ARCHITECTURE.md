@@ -14,10 +14,12 @@ TUI application, stack: Rust (stable toolchain, pinned via `rust-toolchain.toml`
 | `config` | Serde schema of both files, resolution, validation, profile derivation, writers, origin URL parsing | `config` |
 | `app` | Held state: configuration, settings, active tab, open dialog, command line; key dispatch; frame layout | `tui` |
 | `event` | The async loop over terminal events and application messages; runs fetches the app queues and sends their outcomes back | `tui` |
-| `github` | GitHub API calls via GraphQL: listing an owner's Projects (v2), loading a project board's Status columns and issue cards, loading one issue's details by node id | `github` |
+| `github` | GitHub API calls via GraphQL: listing an owner's Projects (v2), loading a project board's Status columns and issue cards, loading one issue's details by node id, listing a repository's pull requests | `github` |
 | `atlassian` | Atlassian REST calls: listing a Jira site's projects | `atlassian` |
 | `command` | `Cmd` parser and the help rows | `tui` |
 | `view::tabs` | Tab line and per-tab summary body | `tui` |
+| `view::remote` | Git Remote tab body: the pull request table with one selected row | `tui` |
+| `view::loading` | Centered box for an outstanding request | `tui` |
 | `view::board` | Task Board tab body: columns of issue cards with labels and assignee badges, one selection, keyboard navigation | `tui` |
 | `view::command_line` | The `:` prompt, the help box above it while open, and the hint bar, error or notice shown while closed | `tui` |
 | `view::dialog::config` | The configuration dialog: kind selections, per-kind fields, validation, forms | `tui` |

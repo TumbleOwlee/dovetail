@@ -109,22 +109,7 @@ impl BoardView {
 
 /// Bordered box centered in `area` for the outstanding board request.
 pub fn render_loading(area: Rect, buf: &mut Buffer) {
-    const MESSAGE: &str = "Board is loading..";
-    buf.set_style(area, Style::default().fg(COLOR_SCHEME.text).bg(theme::BG));
-    let width = (MESSAGE.len() as u16 + 4).min(area.width);
-    let height = 3.min(area.height);
-    let rect = Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
-    };
-    let block = Block::bordered().style(theme::on_bg(COLOR_SCHEME.hi));
-    let inner = block.inner(rect).inner(Margin::new(1, 0));
-    block.render(rect, buf);
-    Paragraph::new(MESSAGE)
-        .style(theme::on_bg(COLOR_SCHEME.hi))
-        .render(inner, buf);
+    crate::view::loading::render(area, buf, "Board is loading..");
 }
 
 /// Space between a card's border and its title and badges.

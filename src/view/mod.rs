@@ -3,5 +3,7 @@
 pub mod board;
 pub mod command_line;
 pub mod dialog;
+pub mod loading;
+pub mod remote;
 pub mod tabs;
 pub mod theme;

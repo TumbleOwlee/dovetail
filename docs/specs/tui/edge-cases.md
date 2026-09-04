@@ -51,3 +51,5 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-019** | The board section is Jira, or credentials are missing | The Task Board tab keeps showing the configuration summary; cites TU-R-050 |
 | **TU-E-020** | Enter on the Task Board tab with no selected card | Ignored; cites TU-R-059 |
 | **TU-E-021** | Issue details arrive after the overlay was closed | Discarded; cites TU-R-059 |
+| **TU-E-022** | The remote section is Bitbucket, or credentials are missing | The Git Remote tab keeps showing the configuration summary; cites TU-R-062 |
+| **TU-E-023** | The repository has no pull requests | The table shows only its header; cites TU-R-063 |

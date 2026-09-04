@@ -80,9 +80,12 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **TU-R-053** — A label badge shall show the label name on a background of the label's color; an assignee badge shall show `@<login>`.
 **TU-R-054** — Exactly one card shall be selected, rendered with a highlighted border; `h` and `l` shall move the selection to the nearest card of the previous or next non-empty column, `j` and `k` to the previous or next card of the same column, all without wrapping.
 **TU-R-055** — A column shall scroll so that its selected card is visible.
-**TU-R-056** — The `reload` command shall request the board again when a request is possible, else show `not configured`.
+**TU-R-056** — The `reload` command shall request the board and the pull request list again, each when its request is possible, else show `not configured`.
 **TU-R-057** — A card's top border shall carry `#<number>` at its left corner and one assignee badge per assignee at its right corner.
 **TU-R-058** — Every view, including the ferrowl-ui widgets, shall paint on the background `#121212`; the board loading box border and text shall use the highlight color.
 **TU-R-059** — Enter on the Task Board tab with a selected card shall request that issue's details and open the details overlay, centered and covering most of the screen, reading `Loading issue..` until the details arrive, or the error message when the request failed.
 **TU-R-060** — The details overlay shall be titled `#<number> <title>` and show one line with the repository, the state and the author, the label and assignee badges, then the body wrapped to the overlay width; `j` and `k` shall scroll the body by one line without leaving its end.
 **TU-R-061** — Esc or `q` shall close the details overlay; while it is open it shall take every key before the command line and the board.
+**TU-R-062** — While the pull request list is outstanding, the Git Remote tab body shall show a bordered box centered in the body reading `Pull requests are loading..`; when it failed, the error message; when no request was possible, the configuration summary as before.
+**TU-R-063** — A loaded list shall render as a bordered table filling the tab body with the columns `#`, `Title`, `State`, `Author`, `Branch` (`head → base`) and `Updated` (the date), one row per pull request in the order of GH-R-013, the state shown as `open`, `draft`, `merged` or `closed`.
+**TU-R-064** — Exactly one row shall be selected and highlighted; `j` and `k` shall move the selection by one row without wrapping.

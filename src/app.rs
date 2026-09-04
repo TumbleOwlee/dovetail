@@ -9,7 +9,8 @@ use ratatui::layout::{Constraint, Layout};
 use crate::command::{self, Cmd};
 use crate::config::profile::{profile_base, store_profile};
 use crate::config::{
-    Board, ConfigError, Origin, Profile, Section, Settings, Source, UserConfig, paths, store,
+    Board, ConfigError, Origin, Profile, Remote, Section, Settings, Source, UserConfig, paths,
+    store,
 };
 use crate::event::Message;
 use crate::view::board::{self, BoardView};
@@ -17,6 +18,8 @@ use crate::view::command_line::{CommandLine, CommandLineEvent};
 use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteForm};
 use crate::view::dialog::config::{Choice, Field};
 use crate::view::dialog::issue::{IssueDialog, IssueEvent};
+use crate::view::loading;
+use crate::view::remote::RemoteView;
 use crate::view::tabs::{self, Tab};
 
 /// A fetch the loop runs on the app's behalf, keyed by the credentials it needs.
@@ -40,6 +43,11 @@ pub enum FetchRequest {
         token: String,
         id: String,
     },
+    PullRequests {
+        token: String,
+        owner: String,
+        repo: String,
+    },
 }
 
 /// What the Task Board tab body shows.
@@ -49,6 +57,15 @@ pub enum BoardState {
     Loading,
     Failed(String),
     Loaded(BoardView),
+}
+
+/// What the Git Remote tab body shows.
+pub enum RemoteState {
+    /// No request is possible: the tab shows the configuration summary.
+    Unavailable,
+    Loading,
+    Failed(String),
+    Loaded(Box<RemoteView>),
 }
 
 pub struct App {
@@ -63,6 +80,7 @@ pub struct App {
     pub issue: Option<IssueDialog>,
     pub command_line: CommandLine,
     pub board: BoardState,
+    pub remote: RemoteState,
     pending_fetches: Vec<FetchRequest>,
     /// A dialog built by `config` that opens once its project list arrives.
     waiting_dialog: Option<ConfigDialog>,
@@ -94,12 +112,14 @@ impl App {
             issue: None,
             command_line: CommandLine::new(),
             board: BoardState::Unavailable,
+            remote: RemoteState::Unavailable,
             pending_fetches: Vec::new(),
             waiting_dialog: None,
             tab_prefix: false,
             quit: false,
         };
         app.request_board();
+        app.request_remote();
         app
     }
 
@@ -133,6 +153,36 @@ impl App {
         true
     }
 
+    /// The GitHub remote's owner, repository and token when all are configured.
+    fn github_remote(&self) -> Option<(&str, &str, &str)> {
+        let settings = self.settings.as_ref()?;
+        let profile = settings
+            .remote
+            .credentials()
+            .and_then(|name| self.user_config.credentials.get(name));
+        match (&settings.remote, profile) {
+            (Remote::Github { owner, repo, .. }, Some(Profile::Github { token })) => {
+                Some((owner, repo, token))
+            }
+            _ => None,
+        }
+    }
+
+    /// Queues a pull request list request when the remote is GitHub with stored credentials.
+    fn request_remote(&mut self) -> bool {
+        let Some((owner, repo, token)) = self.github_remote() else {
+            self.remote = RemoteState::Unavailable;
+            return false;
+        };
+        self.pending_fetches.push(FetchRequest::PullRequests {
+            token: token.to_string(),
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+        });
+        self.remote = RemoteState::Loading;
+        true
+    }
+
     /// Opens the details overlay for the selected card and queues its request.
     fn open_issue(&mut self) {
         let BoardState::Loaded(view) = &self.board else {
@@ -161,6 +211,13 @@ impl App {
             self.board = match outcome {
                 Ok(board) => BoardState::Loaded(BoardView::new(board)),
                 Err(e) => BoardState::Failed(e.to_string()),
+            };
+            return;
+        }
+        if let Message::PullRequests(result) = message {
+            self.remote = match result {
+                Ok(pulls) => RemoteState::Loaded(Box::new(RemoteView::new(pulls))),
+                Err(e) => RemoteState::Failed(e.to_string()),
             };
             return;
         }
@@ -197,7 +254,9 @@ impl App {
             )),
             Message::GithubProjects(Err(e)) => Err(e.to_string()),
             Message::JiraProjects(Err(e)) => Err(e.to_string()),
-            Message::Board(_) | Message::Issue(_) => unreachable!("handled above"),
+            Message::Board(_) | Message::Issue(_) | Message::PullRequests(_) => {
+                unreachable!("handled above")
+            }
         };
         match outcome {
             Ok((field, choices)) => {
@@ -275,6 +334,11 @@ impl App {
                     view.handle_key(code);
                 }
             }
+            (modifiers, code) if self.active_tab == Tab::Remote => {
+                if let RemoteState::Loaded(view) = &mut self.remote {
+                    view.handle_key(modifiers, code);
+                }
+            }
             _ => {}
         }
     }
@@ -294,13 +358,25 @@ impl App {
         let lines = tabs::summary_lines(self.active_tab, self.settings.as_ref(), present);
         let buf = frame.buffer_mut();
         tabs::render_tab_line(top, buf, self.active_tab, self.settings.as_ref());
-        match (&self.active_tab, &self.board) {
-            (Tab::Board, BoardState::Loaded(view)) => view.render(middle, buf),
-            (Tab::Board, BoardState::Loading) => board::render_loading(middle, buf),
-            (Tab::Board, BoardState::Failed(message)) => {
-                tabs::render_body(middle, buf, std::slice::from_ref(message));
-            }
-            _ => tabs::render_body(middle, buf, &lines),
+        match self.active_tab {
+            Tab::Board => match &self.board {
+                BoardState::Loaded(view) => view.render(middle, buf),
+                BoardState::Loading => board::render_loading(middle, buf),
+                BoardState::Failed(message) => {
+                    tabs::render_body(middle, buf, std::slice::from_ref(message));
+                }
+                BoardState::Unavailable => tabs::render_body(middle, buf, &lines),
+            },
+            Tab::Remote => match &mut self.remote {
+                RemoteState::Loaded(view) => view.render(middle, buf),
+                RemoteState::Loading => {
+                    loading::render(middle, buf, "Pull requests are loading..");
+                }
+                RemoteState::Failed(message) => {
+                    tabs::render_body(middle, buf, std::slice::from_ref(message));
+                }
+                RemoteState::Unavailable => tabs::render_body(middle, buf, &lines),
+            },
         }
         self.command_line.render(bottom, buf);
         if let Some(issue) = self.issue.as_mut() {
@@ -322,7 +398,9 @@ impl App {
             Cmd::Write => self.report(self.settings.is_some(), App::write_user),
             Cmd::WriteRepo => self.report(self.settings.is_some(), App::write_repo),
             Cmd::Reload => {
-                if !self.request_board() {
+                let board = self.request_board();
+                let remote = self.request_remote();
+                if !board && !remote {
                     self.command_line.set_error("not configured".to_string());
                 }
             }
@@ -429,6 +507,7 @@ impl App {
                 });
                 self.dialog = None;
                 self.request_board();
+                self.request_remote();
             }
             Err(e) => {
                 if let Some(dialog) = self.dialog.as_mut() {
@@ -1119,11 +1198,18 @@ mod tests {
         assert!(a.dialog.is_none());
         assert_eq!(
             a.take_fetch_requests(),
-            vec![FetchRequest::Board {
-                token: "tok".into(),
-                owner: "o".into(),
-                number: 4
-            }]
+            vec![
+                FetchRequest::Board {
+                    token: "tok".into(),
+                    owner: "o".into(),
+                    number: 4
+                },
+                FetchRequest::PullRequests {
+                    token: "tok".into(),
+                    owner: "o".into(),
+                    repo: "r".into()
+                }
+            ]
         );
     }
 
@@ -1163,5 +1249,80 @@ mod tests {
         )));
         assert!(a.issue.is_none(), "late result discarded");
         assert!(!a.quit);
+    }
+
+    fn remote_settings() -> Settings {
+        let mut s = settings();
+        s.remote = Remote::Github {
+            credentials: Some("gh".into()),
+            owner: "o".into(),
+            repo: "r".into(),
+        };
+        s
+    }
+
+    #[test]
+    /// TU-R-062, TU-R-063, TU-R-064, TU-R-056, TU-E-022 — the pull request list is requested at start and on reload, renders as a table taking `j`/`k`; without credentials the summary stays.
+    fn ut_remote_tab_lists_pull_requests() {
+        let t = TempDir::new("remote");
+        let mut a = app(&t, Some(remote_settings()));
+        let requests = a.take_fetch_requests();
+        assert!(
+            requests.contains(&FetchRequest::PullRequests {
+                token: "t".into(),
+                owner: "o".into(),
+                repo: "r".into()
+            }),
+            "{requests:?}"
+        );
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        key(&mut a, KeyCode::Char('1'));
+        let rows = render_rows(80, 10, |f| a.render(f));
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("Pull requests are loading..")),
+            "{rows:?}"
+        );
+        let pulls = vec![
+            crate::github::pulls::PullRequest {
+                number: 5,
+                title: "Fix crash".into(),
+                ..Default::default()
+            },
+            crate::github::pulls::PullRequest {
+                number: 4,
+                title: "Old".into(),
+                ..Default::default()
+            },
+        ];
+        a.handle_message(Message::PullRequests(Ok(pulls)));
+        let rows = render_rows(80, 10, |f| a.render(f));
+        assert!(rows.iter().any(|r| r.contains("Fix crash")), "{rows:?}");
+        key(&mut a, KeyCode::Char('j'));
+        let RemoteState::Loaded(view) = &a.remote else {
+            panic!("loaded");
+        };
+        assert_eq!(view.selected().map(|p| p.number), Some(4));
+        command(&mut a, "reload");
+        assert_eq!(a.take_fetch_requests().len(), 2);
+        assert!(matches!(a.remote, RemoteState::Loading));
+        a.handle_message(Message::PullRequests(Err(
+            crate::github::GithubError::MissingRepository,
+        )));
+        let rows = render_rows(80, 10, |f| a.render(f));
+        assert!(
+            rows.iter().any(|r| r.contains("repository not found")),
+            "{rows:?}"
+        );
+
+        let mut a = app(&t, Some(settings()));
+        assert!(matches!(a.remote, RemoteState::Unavailable));
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        key(&mut a, KeyCode::Char('1'));
+        let rows = render_rows(80, 10, |f| a.render(f));
+        assert!(
+            rows.iter().any(|r| r.contains("owner: o")),
+            "summary stays: {rows:?}"
+        );
     }
 }
