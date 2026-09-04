@@ -13,7 +13,7 @@ use crate::view::board::wrap_title;
 use crate::view::theme;
 
 /// Screen cells left free around the overlay on each side.
-const INSET: Margin = Margin::new(4, 1);
+const INSET: Margin = Margin::new(4, 3);
 
 /// Space between a card's borders and its text: two columns, one row.
 const CARD_MARGIN: Margin = Margin::new(2, 1);
@@ -330,13 +330,17 @@ mod tests {
     fn ut_loading_then_failure() {
         let mut d = DetailsDialog::new(5, "Fix crash".into(), "Loading thing..");
         let rows = render_rows(80, 24, |f| d.render(f.area(), f.buffer_mut()));
-        assert!(rows[1].contains("#5 Fix crash"), "{}", rows[1]);
-        assert!(rows[1].starts_with("    ┌"), "centered: {}", rows[1]);
+        assert!(rows[3].contains("#5 Fix crash"), "{}", rows[3]);
+        assert!(rows[3].starts_with("    ┌"), "centered: {}", rows[3]);
+        assert!(
+            rows[2].trim().is_empty() && rows[21].trim().is_empty(),
+            "{rows:?}"
+        );
         assert!(
             rows.iter().any(|r| r.contains("Loading thing..")),
             "{rows:?}"
         );
-        assert!(rows[22].contains('└'), "{}", rows[22]);
+        assert!(rows[20].contains('└'), "{}", rows[20]);
         d.set_result(Err::<DetailsContent, _>("github: HTTP 401"));
         let rows = render_rows(80, 24, |f| d.render(f.area(), f.buffer_mut()));
         assert!(
@@ -428,13 +432,13 @@ mod tests {
             .map(|n| comment(Some("a"), &format!("comment {n}")))
             .collect();
         d.set_result(Ok::<_, String>(content("body", many)));
-        let rows = render_rows(80, 16, |f| d.render(f.area(), f.buffer_mut()));
+        let rows = render_rows(80, 20, |f| d.render(f.area(), f.buffer_mut()));
         assert!(rows.iter().any(|r| r.contains("comment 1")), "{rows:?}");
         assert!(!rows.iter().any(|r| r.contains("comment 30")), "{rows:?}");
         for _ in 0..500 {
             assert_eq!(d.handle_key(KeyCode::Char('j')), DetailsEvent::Consumed);
         }
-        let rows = render_rows(80, 16, |f| d.render(f.area(), f.buffer_mut()));
+        let rows = render_rows(80, 20, |f| d.render(f.area(), f.buffer_mut()));
         assert!(
             rows.iter().any(|r| r.contains("comment 30")),
             "scrolled to the end: {rows:?}"
@@ -446,7 +450,7 @@ mod tests {
         for _ in 0..500 {
             d.handle_key(KeyCode::Char('k'));
         }
-        let rows = render_rows(80, 16, |f| d.render(f.area(), f.buffer_mut()));
+        let rows = render_rows(80, 20, |f| d.render(f.area(), f.buffer_mut()));
         assert!(rows.iter().any(|r| r.contains("Fix crash")), "{rows:?}");
     }
 
@@ -549,7 +553,7 @@ mod tests {
         d.handle_key(KeyCode::Char('j'));
         assert_eq!(focused(&mut d), vec!["Labels"], "scrolling keeps the focus");
 
-        let rows = render_rows(80, 9, |f| d.render(f.area(), f.buffer_mut()));
+        let rows = render_rows(80, 13, |f| d.render(f.area(), f.buffer_mut()));
         let bar = bar_of(&rows, BAR_LEFT_80);
         assert!(bar.iter().any(|r| r.contains("Reviewers")), "{bar:?}");
         assert!(
