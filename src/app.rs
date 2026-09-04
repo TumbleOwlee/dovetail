@@ -1024,7 +1024,7 @@ mod tests {
         a.handle_message(Message::Board(Ok(loaded_board())));
         let rows = render_rows(60, 12, |f| a.render(f));
         assert!(rows[1].contains("Todo (2)"), "{}", rows[1]);
-        assert!(rows[3].contains("First"), "{}", rows[3]);
+        assert!(rows[4].contains("First"), "{}", rows[4]);
         key(&mut a, KeyCode::Char('j'));
         match &a.board {
             BoardState::Loaded(view) => assert_eq!(view.selected(), Some((0, 1))),

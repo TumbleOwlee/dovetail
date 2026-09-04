@@ -82,7 +82,7 @@ impl BoardView {
             let body = block.inner(*rect);
             block.render(*rect, buf);
             let selected_here = self.selected.filter(|(c, _)| *c == i).map(|(_, card)| card);
-            let title_width = body.width.saturating_sub(4) as usize;
+            let title_width = body.width.saturating_sub(2 + 2 * CARD_MARGIN.horizontal) as usize;
             let heights: Vec<u16> = column
                 .cards
                 .iter()
@@ -128,9 +128,12 @@ pub fn render_loading(area: Rect, buf: &mut Buffer) {
         .render(inner, buf);
 }
 
-/// Rows the card takes: border, wrapped title lines, badge line, border.
+/// Space between a card's border and its title and badges.
+const CARD_MARGIN: Margin = Margin::new(2, 1);
+
+/// Rows the card takes: border, margin, wrapped title lines, badge line, margin, border.
 fn card_height(card: &Card, title_width: usize) -> u16 {
-    wrap_title(&card.title, title_width).len() as u16 + 3
+    wrap_title(&card.title, title_width).len() as u16 + 3 + 2 * CARD_MARGIN.vertical
 }
 
 /// First card index to draw so the selected card ends inside `height` rows.
@@ -198,7 +201,7 @@ fn render_card(card: &Card, area: Rect, buf: &mut Buffer, highlighted: bool) {
         .style(border)
         .title_top(Line::from(format!("#{}", card.number)).left_aligned())
         .title_top(Line::from(assignees).right_aligned());
-    let inner = block.inner(area).inner(Margin::new(1, 0));
+    let inner = block.inner(area).inner(CARD_MARGIN);
     block.render(area, buf);
     let lines = wrap_title(&card.title, inner.width as usize);
     let [title, badges] = Layout::vertical([
@@ -208,7 +211,7 @@ fn render_card(card: &Card, area: Rect, buf: &mut Buffer, highlighted: bool) {
     .areas(inner);
     let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
     Paragraph::new(text)
-        .style(Style::default().fg(COLOR_SCHEME.text).bg(theme::BG))
+        .style(Style::default().fg(COLOR_SCHEME.text_hi).bg(theme::BG))
         .render(title, buf);
     let mut spans: Vec<Span> = Vec::new();
     for label in &card.labels {
@@ -359,9 +362,9 @@ mod tests {
             .expect("draw");
         let buf = terminal.backend().buffer();
         let x = (0..200u16)
-            .find(|x| buf[(*x, 3)].symbol() == "b" && buf[(*x + 1, 3)].symbol() == "u")
+            .find(|x| buf[(*x, 4)].symbol() == "b" && buf[(*x + 1, 4)].symbol() == "u")
             .expect("bug badge");
-        assert_eq!(buf[(x, 3)].bg, Color::Rgb(0xd7, 0x3a, 0x4a));
+        assert_eq!(buf[(x, 4)].bg, Color::Rgb(0xd7, 0x3a, 0x4a));
     }
 
     #[test]
@@ -378,7 +381,7 @@ mod tests {
             v.handle_key(KeyCode::Char('j'));
         }
         assert_eq!(v.selected(), Some((0, 5)));
-        let rows = render_rows(30, 10, |f| v.render(f.area(), f.buffer_mut()));
+        let rows = render_rows(30, 14, |f| v.render(f.area(), f.buffer_mut()));
         let joined = rows.join("\n");
         assert!(joined.contains("Card6"), "{joined}");
         assert!(!joined.contains("Card1"), "{joined}");
@@ -388,7 +391,7 @@ mod tests {
     /// TU-R-051, TU-R-052, TU-R-053, TU-R-057 — bordered full-height columns titled with name and count; cards with number and assignees in the top border, title and label badges inside.
     fn ut_render_columns_and_cards() {
         let v = BoardView::new(board());
-        let rows = render_rows(200, 12, |f| v.render(f.area(), f.buffer_mut()));
+        let rows = render_rows(200, 16, |f| v.render(f.area(), f.buffer_mut()));
         let header = &rows[0];
         for h in ["Todo (2)", "Doing (0)", "Done (1)", "No status (0)"] {
             assert!(header.contains(h), "{header}");
@@ -396,13 +399,13 @@ mod tests {
         assert!(header.find("Todo").expect("todo") < header.find("Done").expect("done"));
         assert!(header.starts_with('┌'), "{header}");
         assert!(
-            rows[11].starts_with('└'),
+            rows[15].starts_with('└'),
             "column border spans the full height: {}",
-            rows[11]
+            rows[15]
         );
         assert!(rows[5].contains('│'), "{}", rows[5]);
         assert!(
-            rows[2].contains("First") && rows[2].contains("Third"),
+            rows[3].contains("First") && rows[3].contains("Third"),
             "{}",
             rows[2]
         );
@@ -429,14 +432,19 @@ mod tests {
             "assignee at the corner: {}",
             rows[1]
         );
-        assert!(!rows[3].contains("@octo"), "{}", rows[3]);
-        assert!(rows[3].contains("bug"), "{}", rows[3]);
         assert!(
-            rows[3].contains("docs") && rows[3].contains("good first issue"),
+            rows[2].chars().all(|c| c == '│' || c == ' '),
+            "vertical margin: {}",
+            rows[2]
+        );
+        assert!(!rows[4].contains("@octo"), "{}", rows[4]);
+        assert!(rows[4].contains("bug"), "{}", rows[4]);
+        assert!(
+            rows[4].contains("docs") && rows[4].contains("good first issue"),
             "{}",
             rows[3]
         );
-        assert!(rows[6].contains("Second"), "{}", rows[6]);
+        assert!(rows[9].contains("Second"), "{}", rows[9]);
     }
 
     #[test]
@@ -453,23 +461,23 @@ mod tests {
                 ],
             )],
         });
-        let rows = render_rows(30, 16, |f| v.render(f.area(), f.buffer_mut()));
+        let rows = render_rows(30, 20, |f| v.render(f.area(), f.buffer_mut()));
         assert!(rows.iter().all(|r| r.chars().count() <= 30), "{rows:?}");
         assert!(
-            rows[2].starts_with("││ a rather long title"),
+            rows[3].starts_with("││  a rather long title"),
             "margin inside the card: {}",
             rows[2]
         );
-        assert!(rows[4].starts_with("││  verylonglabelname"), "{}", rows[4]);
+        assert!(rows[5].starts_with("││   verylonglabelname"), "{}", rows[5]);
         assert!(
-            rows[3].ends_with(" ││"),
+            rows[4].ends_with("  ││"),
             "margin on the right: {:?}",
             rows[3]
         );
-        assert!(rows[3].contains("wrapping"), "{}", rows[3]);
-        assert!(rows[4].contains("verylonglabelname"), "{}", rows[4]);
+        assert!(rows[4].contains("wrapping"), "{}", rows[4]);
+        assert!(rows[5].contains("verylonglabelname"), "{}", rows[5]);
         assert!(
-            rows[5].contains('└'),
+            rows[7].contains('└'),
             "card closes after the badge line: {}",
             rows[5]
         );
@@ -497,5 +505,18 @@ mod tests {
         assert_eq!(buf[(text, 3)].fg, COLOR_SCHEME.hi);
         assert_eq!(buf[(text, 3)].bg, theme::BG);
         assert_eq!(buf[(0, 0)].bg, theme::BG, "the whole body is painted");
+    }
+
+    #[test]
+    /// TU-R-052 — the title is drawn in the highlighted text color.
+    fn ut_title_uses_highlighted_text_color() {
+        let v = BoardView::new(board());
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        v.render(area, &mut buf);
+        let x = (0..60)
+            .find(|x| buf[(*x, 3)].symbol() == "F" && buf[(*x + 1, 3)].symbol() == "i")
+            .expect("title");
+        assert_eq!(buf[(x, 3)].fg, COLOR_SCHEME.text_hi);
     }
 }
