@@ -82,3 +82,4 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **TU-R-055** — A column shall scroll so that its selected card is visible.
 **TU-R-056** — The `reload` command shall request the board again when a request is possible, else show `not configured`.
 **TU-R-057** — A card's top border shall carry `#<number>` at its left corner and one assignee badge per assignee at its right corner.
+**TU-R-058** — Every view, including the ferrowl-ui widgets, shall paint on the background `#121212`; the board loading box border and text shall use the highlight color.

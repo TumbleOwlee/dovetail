@@ -7,7 +7,6 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ferrowl_ui::state::{
     InputFieldState, InputFieldStateBuilder, SelectionState, SelectionStateBuilder,
 };
-use ferrowl_ui::style::{InputFieldStyle, SelectionStyle};
 use ferrowl_ui::traits::{HandleEvents, SetFocus, ToLabel};
 use ferrowl_ui::widgets::{
     GetValue, InputField, InputFieldBuilder, Selection, SelectionBuilder, Widget,
@@ -19,6 +18,7 @@ use ratatui::style::Style;
 use ratatui::widgets::{Block, Clear, Paragraph, StatefulWidget, Widget as RenderWidget};
 
 use crate::config::{Board, Kind, Origin, Profile, Remote, Section, Settings, UserConfig};
+use crate::view::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoardKind {
@@ -618,11 +618,11 @@ impl ConfigDialog {
             Constraint::Fill(1),
         ])
         .areas(hcenter);
-        let base = Style::default().fg(COLOR_SCHEME.text).bg(COLOR_SCHEME.bg);
+        let base = Style::default().fg(COLOR_SCHEME.text).bg(theme::BG);
         Clear.render(boxed, buf);
         buf.set_style(boxed, base);
         let block = Block::bordered()
-            .style(Style::default().fg(COLOR_SCHEME.hi).bg(COLOR_SCHEME.bg))
+            .style(Style::default().fg(COLOR_SCHEME.hi).bg(theme::BG))
             .title("Configuration")
             .title_alignment(HorizontalAlignment::Center);
         let inner = block.inner(boxed).inner(Margin::new(1, 0));
@@ -672,15 +672,11 @@ impl ConfigDialog {
 
         if let Some(message) = self.error() {
             Paragraph::new(message)
-                .style(Style::default().fg(COLOR_SCHEME.error).bg(COLOR_SCHEME.bg))
+                .style(Style::default().fg(COLOR_SCHEME.error).bg(theme::BG))
                 .render(error, buf);
         }
         Paragraph::new(KEYS)
-            .style(
-                Style::default()
-                    .fg(COLOR_SCHEME.placeholder)
-                    .bg(COLOR_SCHEME.bg),
-            )
+            .style(Style::default().fg(COLOR_SCHEME.placeholder).bg(theme::BG))
             .render(keys, buf);
     }
 
@@ -765,10 +761,7 @@ fn input(title: &str, hint: Option<String>, digits_only: bool) -> InputWidget {
         widget: InputFieldBuilder::default()
             .border(Border::Full(Margin::new(1, 0)))
             .title(Some(title.into()))
-            .style(InputFieldStyle {
-                border: Style::default().fg(COLOR_SCHEME.border).bg(COLOR_SCHEME.bg),
-                ..InputFieldStyle::default()
-            })
+            .style(theme::input_field_style())
             .build()
             .expect("InputFieldBuilder fields all default"),
     }
@@ -787,7 +780,7 @@ fn selection<T: ToLabel + Clone>(
         widget: SelectionBuilder::default()
             .border(Border::Full(Margin::new(1, 0)))
             .title(Some(title.into()))
-            .style(SelectionStyle::default())
+            .style(theme::selection_style())
             .build()
             .expect("SelectionBuilder fields all default"),
     }

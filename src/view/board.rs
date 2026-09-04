@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget};
 
 use crate::github::{Board, Card};
+use crate::view::theme;
 
 pub struct BoardView {
     board: Board,
@@ -64,7 +65,7 @@ impl BoardView {
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
-        let base = Style::default().fg(COLOR_SCHEME.text).bg(COLOR_SCHEME.bg);
+        let base = Style::default().fg(COLOR_SCHEME.text).bg(theme::BG);
         buf.set_style(area, base);
         if self.board.columns.is_empty() || area.height == 0 {
             return;
@@ -73,10 +74,10 @@ impl BoardView {
         let columns = Layout::horizontal(widths).split(area);
         for (i, (column, rect)) in self.board.columns.iter().zip(columns.iter()).enumerate() {
             let block = Block::bordered()
-                .style(Style::default().fg(COLOR_SCHEME.border).bg(COLOR_SCHEME.bg))
+                .style(Style::default().fg(COLOR_SCHEME.border).bg(theme::BG))
                 .title(Span::styled(
                     format!(" {} ({}) ", column.name, column.cards.len()),
-                    Style::default().fg(COLOR_SCHEME.hi).bg(COLOR_SCHEME.bg),
+                    Style::default().fg(COLOR_SCHEME.hi).bg(theme::BG),
                 ));
             let body = block.inner(*rect);
             block.render(*rect, buf);
@@ -110,10 +111,7 @@ impl BoardView {
 /// Bordered box centered in `area` for the outstanding board request.
 pub fn render_loading(area: Rect, buf: &mut Buffer) {
     const MESSAGE: &str = "Board is loading..";
-    buf.set_style(
-        area,
-        Style::default().fg(COLOR_SCHEME.text).bg(COLOR_SCHEME.bg),
-    );
+    buf.set_style(area, Style::default().fg(COLOR_SCHEME.text).bg(theme::BG));
     let width = (MESSAGE.len() as u16 + 4).min(area.width);
     let height = 3.min(area.height);
     let rect = Rect {
@@ -122,12 +120,11 @@ pub fn render_loading(area: Rect, buf: &mut Buffer) {
         width,
         height,
     };
-    let block =
-        Block::bordered().style(Style::default().fg(COLOR_SCHEME.border).bg(COLOR_SCHEME.bg));
+    let block = Block::bordered().style(theme::on_bg(COLOR_SCHEME.hi));
     let inner = block.inner(rect).inner(Margin::new(1, 0));
     block.render(rect, buf);
     Paragraph::new(MESSAGE)
-        .style(Style::default().fg(COLOR_SCHEME.text).bg(COLOR_SCHEME.bg))
+        .style(theme::on_bg(COLOR_SCHEME.hi))
         .render(inner, buf);
 }
 
@@ -181,9 +178,9 @@ fn wrap_title(title: &str, width: usize) -> Vec<String> {
 
 fn render_card(card: &Card, area: Rect, buf: &mut Buffer, highlighted: bool) {
     let border = if highlighted {
-        Style::default().fg(COLOR_SCHEME.hi).bg(COLOR_SCHEME.bg)
+        Style::default().fg(COLOR_SCHEME.hi).bg(theme::BG)
     } else {
-        Style::default().fg(COLOR_SCHEME.border).bg(COLOR_SCHEME.bg)
+        Style::default().fg(COLOR_SCHEME.border).bg(theme::BG)
     };
     let mut assignees: Vec<Span> = Vec::new();
     for (i, login) in card.assignees.iter().enumerate() {
@@ -211,7 +208,7 @@ fn render_card(card: &Card, area: Rect, buf: &mut Buffer, highlighted: bool) {
     .areas(inner);
     let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
     Paragraph::new(text)
-        .style(Style::default().fg(COLOR_SCHEME.text).bg(COLOR_SCHEME.bg))
+        .style(Style::default().fg(COLOR_SCHEME.text).bg(theme::BG))
         .render(title, buf);
     let mut spans: Vec<Span> = Vec::new();
     for label in &card.labels {
@@ -482,5 +479,23 @@ mod tests {
         assert_eq!(wrap_title("ab cd", 3), vec!["ab", "cd"]);
         assert_eq!(wrap_title("abcdef", 4), vec!["abcd", "ef"]);
         assert_eq!(wrap_title("", 4), vec![""]);
+    }
+
+    #[test]
+    /// TU-R-050, TU-R-058 — the loading box is centered and drawn in the highlight color on the background.
+    fn ut_loading_box_is_highlighted() {
+        let area = Rect::new(0, 0, 40, 7);
+        let mut buf = Buffer::empty(area);
+        render_loading(area, &mut buf);
+        let row =
+            |y: u16| -> String { (0..40).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+        assert!(row(3).contains("Board is loading.."), "{}", row(3));
+        assert!(row(2).contains('┌') && row(4).contains('└'), "{}", row(2));
+        let corner = row(2).find('┌').expect("corner") as u16;
+        assert_eq!(buf[(corner, 2)].fg, COLOR_SCHEME.hi);
+        let text = row(3).find('B').expect("text") as u16;
+        assert_eq!(buf[(text, 3)].fg, COLOR_SCHEME.hi);
+        assert_eq!(buf[(text, 3)].bg, theme::BG);
+        assert_eq!(buf[(0, 0)].bg, theme::BG, "the whole body is painted");
     }
 }

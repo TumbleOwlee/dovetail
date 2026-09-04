@@ -14,6 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, StatefulWidget, Widget as RenderWidget};
 
 use crate::command::HELP;
+use crate::view::theme;
 
 type Input = Widget<InputFieldState, InputField<String>>;
 
@@ -48,7 +49,7 @@ impl Default for CommandLine {
 
 impl CommandLine {
     pub fn new() -> CommandLine {
-        let base = Style::default().fg(COLOR_SCHEME.text).bg(COLOR_SCHEME.bg);
+        let base = Style::default().fg(COLOR_SCHEME.text).bg(theme::BG);
         let state = InputFieldStateBuilder::default()
             .focused(false)
             // An empty placeholder keeps the widget's "Enter value.." hint off the line.
@@ -61,7 +62,7 @@ impl CommandLine {
             .style(InputFieldStyle {
                 general: base,
                 focused: base,
-                ..InputFieldStyle::default()
+                ..theme::input_field_style()
             })
             .build()
             .expect("InputFieldBuilder fields all default");
@@ -134,18 +135,18 @@ impl CommandLine {
 
     /// The bottom line: the prompt while open; else the error, the notice, or the hint bar.
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
-        let base = Style::default().fg(COLOR_SCHEME.text).bg(COLOR_SCHEME.bg);
+        let base = Style::default().fg(COLOR_SCHEME.text).bg(theme::BG);
         buf.set_style(area, base);
         if self.open {
             let [prompt, rest] =
                 Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
             Paragraph::new(":")
-                .style(Style::default().fg(COLOR_SCHEME.hi).bg(COLOR_SCHEME.bg))
+                .style(Style::default().fg(COLOR_SCHEME.hi).bg(theme::BG))
                 .render(prompt, buf);
             StatefulWidget::render(&self.input.widget, rest, buf, &mut self.input.state);
         } else if let Some(error) = self.error() {
             Paragraph::new(error)
-                .style(Style::default().fg(COLOR_SCHEME.error).bg(COLOR_SCHEME.bg))
+                .style(Style::default().fg(COLOR_SCHEME.error).bg(theme::BG))
                 .render(area, buf);
         } else if let Some(notice) = &self.notice {
             Paragraph::new(notice.as_str())
@@ -162,11 +163,8 @@ impl CommandLine {
         if !self.open || bounds.height < 3 {
             return;
         }
-        let usage_style = Style::default()
-            .fg(COLOR_SCHEME.hi)
-            .bg(COLOR_SCHEME.bg)
-            .bold();
-        let desc_style = Style::default().fg(COLOR_SCHEME.text).bg(COLOR_SCHEME.bg);
+        let usage_style = Style::default().fg(COLOR_SCHEME.hi).bg(theme::BG).bold();
+        let desc_style = Style::default().fg(COLOR_SCHEME.text).bg(theme::BG);
         let lines: Vec<Line> = HELP
             .iter()
             .map(|(usage, desc)| {
@@ -184,12 +182,11 @@ impl CommandLine {
             height,
         };
         Clear.render(popup, buf);
-        let block =
-            Block::bordered().style(Style::default().fg(COLOR_SCHEME.hi).bg(COLOR_SCHEME.bg));
+        let block = Block::bordered().style(Style::default().fg(COLOR_SCHEME.hi).bg(theme::BG));
         let inner = block.inner(popup);
         block.render(popup, buf);
         Paragraph::new(lines)
-            .style(Style::default().bg(COLOR_SCHEME.bg))
+            .style(Style::default().bg(theme::BG))
             .render(inner, buf);
     }
 }

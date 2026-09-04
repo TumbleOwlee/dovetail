@@ -10,6 +10,7 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Paragraph, StatefulWidget, Widget};
 
 use crate::config::{Kind, Section, Settings};
+use crate::view::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -108,6 +109,7 @@ pub fn render_tab_line(area: Rect, buf: &mut Buffer, active: Tab, settings: Opti
         selected: Tab::ALL.iter().position(|t| *t == active).unwrap_or(0),
     };
     let tabs = ScrollingTabsBuilder::<String>::default()
+        .style(theme::scrolling_tabs_style())
         .build()
         .expect("ScrollingTabsBuilder fields all default");
     StatefulWidget::render(&tabs, area, buf, &mut state);
@@ -121,7 +123,7 @@ pub fn render_body(area: Rect, buf: &mut Buffer, lines: &[String]) {
             .collect::<Vec<_>>(),
     );
     Paragraph::new(text)
-        .style(Style::default().fg(COLOR_SCHEME.text).bg(COLOR_SCHEME.bg))
+        .style(Style::default().fg(COLOR_SCHEME.text).bg(theme::BG))
         .render(area, buf);
 }
 
