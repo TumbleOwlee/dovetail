@@ -19,7 +19,7 @@ TUI application, stack: Rust (stable toolchain, pinned via `rust-toolchain.toml`
 | `command` | `Cmd` parser and the help rows | `tui` |
 | `view::tabs` | Tab line and per-tab summary body | `tui` |
 | `view::remote` | Git Remote tab body: the pull request table with one selected row | `tui` |
-| `view::loading` | Centered box for an outstanding request | `tui` |
+| `view::notice` | Centered box for an outstanding request or its failure | `tui` |
 | `view::board` | Task Board tab body: columns of issue cards with labels and assignee badges, one selection, keyboard navigation | `tui` |
 | `view::command_line` | The `:` prompt, the help box above it while open, and the hint bar, error or notice shown while closed | `tui` |
 | `view::dialog::config` | The configuration dialog: kind selections, per-kind fields, validation, forms | `tui` |

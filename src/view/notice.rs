@@ -1,14 +1,24 @@
-//! Centered box for an outstanding request.
+//! Centered box for an outstanding request or its failure.
 
 use ferrowl_ui::COLOR_SCHEME;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Margin, Rect};
+use ratatui::style::Color;
 use ratatui::widgets::{Block, Paragraph, Widget};
 
 use crate::view::theme;
 
 /// Paints `area` and draws `message` in a bordered box centered in it, both in the highlight color.
-pub fn render(area: Rect, buf: &mut Buffer, message: &str) {
+pub fn render_loading(area: Rect, buf: &mut Buffer, message: &str) {
+    render(area, buf, message, COLOR_SCHEME.hi);
+}
+
+/// Paints `area` and draws `message` in a bordered box centered in it, both in the error color.
+pub fn render_error(area: Rect, buf: &mut Buffer, message: &str) {
+    render(area, buf, message, COLOR_SCHEME.error);
+}
+
+fn render(area: Rect, buf: &mut Buffer, message: &str, color: Color) {
     buf.set_style(area, theme::base());
     let width = (message.len() as u16 + 4).min(area.width);
     let height = 3.min(area.height);
@@ -18,10 +28,10 @@ pub fn render(area: Rect, buf: &mut Buffer, message: &str) {
         width,
         height,
     };
-    let block = Block::bordered().style(theme::on_bg(COLOR_SCHEME.hi));
+    let block = Block::bordered().style(theme::on_bg(color));
     let inner = block.inner(rect).inner(Margin::new(1, 0));
     block.render(rect, buf);
     Paragraph::new(message)
-        .style(theme::on_bg(COLOR_SCHEME.hi))
+        .style(theme::on_bg(color))
         .render(inner, buf);
 }

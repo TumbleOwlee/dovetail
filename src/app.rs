@@ -19,7 +19,7 @@ use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteFo
 use crate::view::dialog::config::{Choice, Field};
 use crate::view::dialog::issue::{IssueDialog, IssueEvent};
 use crate::view::dialog::pull::{PullDialog, PullEvent};
-use crate::view::loading;
+use crate::view::notice;
 use crate::view::remote::RemoteView;
 use crate::view::tabs::{self, Tab};
 
@@ -409,19 +409,15 @@ impl App {
             Tab::Board => match &self.board {
                 BoardState::Loaded(view) => view.render(middle, buf),
                 BoardState::Loading => board::render_loading(middle, buf),
-                BoardState::Failed(message) => {
-                    tabs::render_body(middle, buf, std::slice::from_ref(message));
-                }
+                BoardState::Failed(message) => notice::render_error(middle, buf, message),
                 BoardState::Unavailable => tabs::render_body(middle, buf, &lines),
             },
             Tab::Remote => match &mut self.remote {
                 RemoteState::Loaded(view) => view.render(middle, buf),
                 RemoteState::Loading => {
-                    loading::render(middle, buf, "Pull requests are loading..");
+                    notice::render_loading(middle, buf, "Pull requests are loading..");
                 }
-                RemoteState::Failed(message) => {
-                    tabs::render_body(middle, buf, std::slice::from_ref(message));
-                }
+                RemoteState::Failed(message) => notice::render_error(middle, buf, message),
                 RemoteState::Unavailable => tabs::render_body(middle, buf, &lines),
             },
         }
@@ -1210,8 +1206,24 @@ mod tests {
             _ => panic!("board not loaded"),
         }
         a.handle_message(Message::Board(Err(crate::github::GithubError::Status(403))));
-        let rows = render_rows(60, 6, |f| a.render(f));
-        assert_eq!(rows[1], "github: HTTP 403");
+        let rows = render_rows(60, 7, |f| a.render(f));
+        let row = rows
+            .iter()
+            .position(|r| r.contains("github: HTTP 403"))
+            .expect("error box");
+        assert_eq!(row, 3, "vertically centered: {rows:?}");
+        assert!(
+            rows[row].starts_with("                  │"),
+            "horizontally centered: {}",
+            rows[row]
+        );
+        assert!(rows[2].contains('┌') && rows[4].contains('└'), "{rows:?}");
+        command(&mut a, "reload");
+        let rows = render_rows(60, 7, |f| a.render(f));
+        assert!(
+            !rows.iter().any(|r| r.contains("HTTP 403")),
+            "hidden on reload: {rows:?}"
+        );
     }
 
     #[test]
@@ -1360,6 +1372,14 @@ mod tests {
             crate::github::GithubError::MissingRepository,
         )));
         let rows = render_rows(80, 10, |f| a.render(f));
+        let row = rows
+            .iter()
+            .position(|r| r.contains("repository not found"))
+            .expect("error box");
+        assert!(
+            rows[row - 1].contains('┌') && rows[row + 1].contains('└'),
+            "{rows:?}"
+        );
         assert!(
             rows.iter().any(|r| r.contains("repository not found")),
             "{rows:?}"

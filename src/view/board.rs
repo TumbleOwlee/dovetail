@@ -109,7 +109,7 @@ impl BoardView {
 
 /// Bordered box centered in `area` for the outstanding board request.
 pub fn render_loading(area: Rect, buf: &mut Buffer) {
-    crate::view::loading::render(area, buf, "Board is loading..");
+    crate::view::notice::render_loading(area, buf, "Board is loading..");
 }
 
 /// Space between a card's border and its title and badges.
