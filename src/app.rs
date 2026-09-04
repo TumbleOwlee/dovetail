@@ -12,7 +12,7 @@ use crate::config::{
     Board, ConfigError, Origin, Profile, Section, Settings, Source, UserConfig, paths, store,
 };
 use crate::event::Message;
-use crate::view::board::BoardView;
+use crate::view::board::{self, BoardView};
 use crate::view::command_line::{CommandLine, CommandLineEvent};
 use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteForm};
 use crate::view::dialog::config::{Choice, Field};
@@ -251,9 +251,7 @@ impl App {
         tabs::render_tab_line(top, buf, self.active_tab, self.settings.as_ref());
         match (&self.active_tab, &self.board) {
             (Tab::Board, BoardState::Loaded(view)) => view.render(middle, buf),
-            (Tab::Board, BoardState::Loading) => {
-                tabs::render_body(middle, buf, &["loading board…".to_string()]);
-            }
+            (Tab::Board, BoardState::Loading) => board::render_loading(middle, buf),
             (Tab::Board, BoardState::Failed(message)) => {
                 tabs::render_body(middle, buf, std::slice::from_ref(message));
             }
@@ -766,7 +764,17 @@ mod tests {
         command(&mut a, "frob");
         let rows = render_rows(60, 10, |f| a.render(f));
         assert!(rows[0].contains("[0] Task Board [GitHub]"), "{}", rows[0]);
-        assert_eq!(rows[1], "loading board…");
+        let (row, x) = rows
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| r.find("Board is loading..").map(|x| (i, x)))
+            .expect("loading box");
+        assert!((3..=6).contains(&row), "vertically centered: {rows:?}");
+        assert!((15..=25).contains(&x), "horizontally centered: {rows:?}");
+        assert!(
+            rows[row - 1].contains('┌') && rows[row + 1].contains('└'),
+            "{rows:?}"
+        );
         assert_eq!(rows[9], "unknown command: frob");
         a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
         key(&mut a, KeyCode::Char('1'));
@@ -989,7 +997,7 @@ mod tests {
         );
         assert!(matches!(a.board, BoardState::Loading));
         let rows = render_rows(60, 6, |f| a.render(f));
-        assert_eq!(rows[1], "loading board…");
+        assert!(rows[2].contains("Board is loading.."), "{rows:?}");
     }
 
     #[test]

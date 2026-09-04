@@ -3,7 +3,7 @@
 use crossterm::event::KeyCode;
 use ferrowl_ui::COLOR_SCHEME;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget};
@@ -81,7 +81,7 @@ impl BoardView {
             let body = block.inner(*rect);
             block.render(*rect, buf);
             let selected_here = self.selected.filter(|(c, _)| *c == i).map(|(_, card)| card);
-            let title_width = body.width.saturating_sub(2) as usize;
+            let title_width = body.width.saturating_sub(4) as usize;
             let heights: Vec<u16> = column
                 .cards
                 .iter()
@@ -105,6 +105,30 @@ impl BoardView {
             }
         }
     }
+}
+
+/// Bordered box centered in `area` for the outstanding board request.
+pub fn render_loading(area: Rect, buf: &mut Buffer) {
+    const MESSAGE: &str = "Board is loading..";
+    buf.set_style(
+        area,
+        Style::default().fg(COLOR_SCHEME.text).bg(COLOR_SCHEME.bg),
+    );
+    let width = (MESSAGE.len() as u16 + 4).min(area.width);
+    let height = 3.min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    let block =
+        Block::bordered().style(Style::default().fg(COLOR_SCHEME.border).bg(COLOR_SCHEME.bg));
+    let inner = block.inner(rect).inner(Margin::new(1, 0));
+    block.render(rect, buf);
+    Paragraph::new(MESSAGE)
+        .style(Style::default().fg(COLOR_SCHEME.text).bg(COLOR_SCHEME.bg))
+        .render(inner, buf);
 }
 
 /// Rows the card takes: border, wrapped title lines, badge line, border.
@@ -162,7 +186,7 @@ fn render_card(card: &Card, area: Rect, buf: &mut Buffer, highlighted: bool) {
         Style::default().fg(COLOR_SCHEME.border).bg(COLOR_SCHEME.bg)
     };
     let block = Block::bordered().style(border);
-    let inner = block.inner(area);
+    let inner = block.inner(area).inner(Margin::new(1, 0));
     block.render(area, buf);
     let lines = wrap_title(&card.title, inner.width as usize);
     let [title, badges] = Layout::vertical([
@@ -393,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-052, TU-E-017, TU-E-018 — titles wrap to the card width, a long word breaks, badges truncate.
+    /// TU-R-052, TU-E-017, TU-E-018 — titles wrap to the card content width inside a one-column margin, a long word breaks, badges truncate.
     fn ut_titles_wrap_and_badges_truncate() {
         let labels: Vec<(&str, &str)> = (0..10).map(|_| ("verylonglabelname", "000000")).collect();
         let v = BoardView::new(Board {
@@ -408,7 +432,17 @@ mod tests {
         });
         let rows = render_rows(30, 16, |f| v.render(f.area(), f.buffer_mut()));
         assert!(rows.iter().all(|r| r.chars().count() <= 30), "{rows:?}");
-        assert!(rows[2].contains("a rather long title"), "{}", rows[2]);
+        assert!(
+            rows[2].starts_with("││ a rather long title"),
+            "margin inside the card: {}",
+            rows[2]
+        );
+        assert!(rows[4].starts_with("││  verylonglabelname"), "{}", rows[4]);
+        assert!(
+            rows[3].ends_with(" ││"),
+            "margin on the right: {:?}",
+            rows[3]
+        );
         assert!(rows[3].contains("wrapping"), "{}", rows[3]);
         assert!(rows[4].contains("verylonglabelname"), "{}", rows[4]);
         assert!(
