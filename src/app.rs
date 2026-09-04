@@ -8,10 +8,28 @@ use ratatui::layout::{Constraint, Layout};
 
 use crate::command::{self, Cmd};
 use crate::config::profile::{profile_base, store_profile};
-use crate::config::{ConfigError, Origin, Section, Settings, Source, UserConfig, paths, store};
+use crate::config::{
+    Board, ConfigError, Origin, Profile, Section, Settings, Source, UserConfig, paths, store,
+};
+use crate::event::Message;
 use crate::view::command_line::{CommandLine, CommandLineEvent};
 use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteForm};
+use crate::view::dialog::config::{Choice, Field};
 use crate::view::tabs::{self, Tab};
+
+/// A fetch the loop runs on the app's behalf, keyed by the credentials it needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchRequest {
+    GithubProjects {
+        token: String,
+        owner: String,
+    },
+    JiraProjects {
+        base_url: String,
+        email: String,
+        token: String,
+    },
+}
 
 pub struct App {
     pub repo_root: PathBuf,
@@ -22,6 +40,7 @@ pub struct App {
     pub active_tab: Tab,
     pub dialog: Option<ConfigDialog>,
     pub command_line: CommandLine,
+    pending_fetches: Vec<FetchRequest>,
     quit: bool,
 }
 
@@ -46,7 +65,48 @@ impl App {
             active_tab: Tab::Board,
             dialog,
             command_line: CommandLine::new(),
+            pending_fetches: Vec::new(),
             quit: false,
+        }
+    }
+
+    /// Fetches queued since the last call, for the loop to run.
+    pub fn take_fetch_requests(&mut self) -> Vec<FetchRequest> {
+        std::mem::take(&mut self.pending_fetches)
+    }
+
+    /// A fetch outcome; ignored when no dialog is open.
+    pub fn handle_message(&mut self, message: Message) {
+        let Some(dialog) = self.dialog.as_mut() else {
+            return;
+        };
+        match message {
+            Message::GithubProjects(Ok(projects)) => dialog.set_options(
+                Field::BoardProject,
+                projects
+                    .into_iter()
+                    .map(|p| Choice {
+                        value: p.number.to_string(),
+                        label: format!("{} {}", p.number, p.title),
+                    })
+                    .collect(),
+            ),
+            Message::GithubProjects(Err(e)) => {
+                dialog.set_unavailable(Field::BoardProject, e.to_string());
+            }
+            Message::JiraProjects(Ok(projects)) => dialog.set_options(
+                Field::JiraProjectKey,
+                projects
+                    .into_iter()
+                    .map(|p| Choice {
+                        label: format!("{} {}", p.key, p.name),
+                        value: p.key,
+                    })
+                    .collect(),
+            ),
+            Message::JiraProjects(Err(e)) => {
+                dialog.set_unavailable(Field::JiraProjectKey, e.to_string());
+            }
         }
     }
 
@@ -147,12 +207,42 @@ impl App {
     }
 
     fn open_dialog(&mut self) {
-        self.dialog = Some(match &self.settings {
-            Some(settings) => {
-                ConfigDialog::from_settings(settings, &self.user_config, self.origin.as_ref())
+        let Some(settings) = &self.settings else {
+            self.dialog = Some(ConfigDialog::new(self.origin.as_ref()));
+            return;
+        };
+        let mut dialog =
+            ConfigDialog::from_settings(settings, &self.user_config, self.origin.as_ref());
+        let profile = settings
+            .board
+            .credentials()
+            .and_then(|name| self.user_config.credentials.get(name));
+        match (&settings.board, profile) {
+            (Board::Github { owner, .. }, Some(Profile::Github { token })) => {
+                self.pending_fetches.push(FetchRequest::GithubProjects {
+                    token: token.clone(),
+                    owner: owner.clone(),
+                });
+                dialog.set_loading(Field::BoardProject);
             }
-            None => ConfigDialog::new(self.origin.as_ref()),
-        });
+            (
+                Board::Jira { .. },
+                Some(Profile::Jira {
+                    base_url,
+                    email,
+                    token,
+                }),
+            ) => {
+                self.pending_fetches.push(FetchRequest::JiraProjects {
+                    base_url: base_url.clone(),
+                    email: email.clone(),
+                    token: token.clone(),
+                });
+                dialog.set_loading(Field::JiraProjectKey);
+            }
+            _ => {}
+        }
+        self.dialog = Some(dialog);
     }
 
     fn confirm_dialog(&mut self, board: BoardForm, remote: RemoteForm) {
@@ -575,5 +665,113 @@ mod tests {
         };
         assert!(!a.credentials_present(&dangling));
         assert_eq!(dangling.kind(), Kind::Jira);
+    }
+
+    fn jira_settings() -> Settings {
+        Settings {
+            board: Board::Jira {
+                credentials: Some("j".into()),
+                project_key: "OPS".into(),
+            },
+            remote: Remote::Github {
+                credentials: None,
+                owner: "o".into(),
+                repo: "r".into(),
+            },
+            source: Source::UserFile,
+        }
+    }
+
+    #[test]
+    /// TU-R-038 — opening with a GitHub board profile queues a project fetch and marks the field.
+    fn ut_config_queues_github_fetch() {
+        let t = TempDir::new("fetchgh");
+        let mut a = app(&t, Some(settings()));
+        assert!(a.take_fetch_requests().is_empty());
+        command(&mut a, "config");
+        assert_eq!(
+            a.take_fetch_requests(),
+            vec![FetchRequest::GithubProjects {
+                token: "t".into(),
+                owner: "o".into()
+            }]
+        );
+        assert!(a.take_fetch_requests().is_empty());
+        let rows = render_rows(100, 30, |f| a.render(f));
+        assert!(rows.join("\n").contains("(loading…)"));
+    }
+
+    #[test]
+    /// TU-R-039 — opening with a Jira board profile queues a Jira project fetch.
+    fn ut_config_queues_jira_fetch() {
+        let t = TempDir::new("fetchjira");
+        let mut a = app(&t, Some(jira_settings()));
+        a.user_config.credentials.insert(
+            "j".into(),
+            crate::config::Profile::Jira {
+                base_url: "https://x".into(),
+                email: "e".into(),
+                token: "t".into(),
+            },
+        );
+        command(&mut a, "config");
+        assert_eq!(
+            a.take_fetch_requests(),
+            vec![FetchRequest::JiraProjects {
+                base_url: "https://x".into(),
+                email: "e".into(),
+                token: "t".into()
+            }]
+        );
+    }
+
+    #[test]
+    /// TU-E-009 — no stored credentials, no fetch: first run and repository-file settings alike.
+    fn ut_no_fetch_without_credentials() {
+        let t = TempDir::new("nofetch");
+        let mut a = app(&t, None);
+        assert!(a.take_fetch_requests().is_empty());
+        let mut repo_file = settings();
+        repo_file.board.set_credentials(None);
+        repo_file.source = Source::RepoFile;
+        let mut a = app(&t, Some(repo_file));
+        command(&mut a, "config");
+        assert!(a.take_fetch_requests().is_empty());
+    }
+
+    #[test]
+    /// TU-R-038, TU-R-041 — outcomes reach the open dialog as options or as an error.
+    fn ut_message_updates_open_dialog() {
+        let t = TempDir::new("msg");
+        let mut a = app(&t, Some(settings()));
+        command(&mut a, "config");
+        a.handle_message(Message::GithubProjects(Ok(vec![crate::github::Project {
+            number: NonZeroU64::new(1).expect("nz"),
+            title: "Roadmap".into(),
+        }])));
+        let d = a.dialog.as_ref().expect("dialog");
+        assert!(d.has_selection(Field::BoardProject));
+        assert_eq!(d.value(Field::BoardProject), "1");
+        let mut a = app(&t, Some(jira_settings()));
+        command(&mut a, "config");
+        a.handle_message(Message::JiraProjects(Err(
+            crate::atlassian::AtlassianError::Status(401),
+        )));
+        let d = a.dialog.as_ref().expect("dialog");
+        assert!(!d.has_selection(Field::JiraProjectKey));
+        assert_eq!(d.error(), Some("jira: HTTP 401"));
+    }
+
+    #[test]
+    /// TU-E-011 — an outcome arriving with no dialog open is discarded.
+    fn ut_message_without_dialog_is_discarded() {
+        let t = TempDir::new("late");
+        let mut a = app(&t, Some(settings()));
+        a.handle_message(Message::GithubProjects(Ok(Vec::new())));
+        assert!(a.dialog.is_none());
+        let _ = Choice {
+            value: String::new(),
+            label: String::new(),
+        };
     }
 }

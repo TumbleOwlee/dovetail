@@ -1,9 +1,11 @@
 //! prodgy: one terminal for the task board, the git remote, and the spec-driven workflow.
 
 mod app;
+mod atlassian;
 mod command;
 mod config;
 mod event;
+mod github;
 #[cfg(test)]
 mod testkit;
 mod view;
@@ -65,9 +67,9 @@ async fn main() {
         }
     };
     let (tx, rx) = tokio::sync::mpsc::channel(64);
-    let (_message_tx, message_rx) = tokio::sync::mpsc::channel::<event::Message>(64);
+    let (message_tx, message_rx) = tokio::sync::mpsc::channel::<event::Message>(64);
     event::spawn_terminal_reader(tx);
-    let outcome = event::run(&mut app, &mut screen, rx, message_rx).await;
+    let outcome = event::run(&mut app, &mut screen, rx, message_tx, message_rx).await;
     drop(screen);
     if let Err(e) = outcome {
         eprintln!("error: {e}");

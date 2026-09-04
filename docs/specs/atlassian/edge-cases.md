@@ -24,4 +24,7 @@ table rows included. Cite the governing requirement inline.
 **AT-E-002** — <what is deliberately not done>: <why>. Cites AT-R-0nn.
 -->
 
-*(Empty.)*
+## Known limitations — intentional constraints
+
+**AT-E-001** — Only the first 100 projects of a site are listed; `nextPage` is not followed. Cites AT-R-003.
+**AT-E-002** — A `base_url` with a trailing slash yields a double slash in the request path; the URL is used as stored. Cites AT-R-001.

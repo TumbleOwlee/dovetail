@@ -9,7 +9,9 @@ use ferrowl_ui::state::{
 };
 use ferrowl_ui::style::{InputFieldStyle, SelectionStyle};
 use ferrowl_ui::traits::{HandleEvents, SetFocus, ToLabel};
-use ferrowl_ui::widgets::{InputField, InputFieldBuilder, Selection, SelectionBuilder, Widget};
+use ferrowl_ui::widgets::{
+    GetValue, InputField, InputFieldBuilder, Selection, SelectionBuilder, Widget,
+};
 use ferrowl_ui::{Border, COLOR_SCHEME};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, HorizontalAlignment, Layout, Margin, Rect};
@@ -103,6 +105,15 @@ impl Field {
             Field::BbRepo => "Repository slug",
             Field::BbUsername => "Username",
             Field::BbAppPassword => "App password",
+        }
+    }
+
+    /// Position in `ConfigDialog::lists` for the fields that can show a fetched selection.
+    fn list_index(self) -> Option<usize> {
+        match self {
+            Field::BoardProject => Some(0),
+            Field::JiraProjectKey => Some(1),
+            _ => None,
         }
     }
 
@@ -279,6 +290,29 @@ pub enum DialogEvent {
 }
 
 type InputWidget = Widget<InputFieldState, InputField<String>>;
+type ChoiceWidget = Widget<SelectionState<Choice>, Selection<Choice>>;
+
+/// One entry of a fetched option list: the stored value and the text shown for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub value: String,
+    pub label: String,
+}
+
+impl ToLabel for Choice {
+    fn to_label(&self) -> String {
+        self.label.clone()
+    }
+}
+
+/// Whether a list-backed field currently shows its input or a fetched selection.
+enum ListState {
+    Idle,
+    Loading,
+    Unavailable,
+    NotListed,
+    Loaded(ChoiceWidget),
+}
 
 const WIDTH: u16 = 84;
 const HEIGHT: u16 = 21;
@@ -288,6 +322,8 @@ pub struct ConfigDialog {
     board_kind: Widget<SelectionState<BoardKind>, Selection<BoardKind>>,
     remote_kind: Widget<SelectionState<RemoteKind>, Selection<RemoteKind>>,
     fields: Vec<InputWidget>,
+    /// One entry per list-backed field, indexed by `Field::list_index`.
+    lists: [ListState; 2],
     focus: Slot,
     error: Option<String>,
 }
@@ -309,11 +345,82 @@ impl ConfigDialog {
                 vec![RemoteKind::Github, RemoteKind::Bitbucket],
             ),
             fields,
+            lists: [ListState::Idle, ListState::Idle],
             focus: Slot::BoardKind,
             error: None,
         };
+        if origin.is_some_and(|o| o.host == Kind::Bitbucket) {
+            dialog.remote_kind.state.set_selection(1);
+        }
         dialog.set_focus(Slot::BoardKind);
         dialog
+    }
+
+    /// Marks a list-backed field as waiting for its options.
+    pub fn set_loading(&mut self, field: Field) {
+        if let Some(i) = field.list_index() {
+            self.lists[i] = ListState::Loading;
+            self.set_title_suffix(field, " (loading…)");
+        }
+    }
+
+    /// Records a failed fetch: the field stays an input and the error is shown.
+    pub fn set_unavailable(&mut self, field: Field, error: String) {
+        if let Some(i) = field.list_index() {
+            self.lists[i] = ListState::Unavailable;
+            self.set_title_suffix(field, " (list unavailable)");
+            self.error = Some(error);
+        }
+    }
+
+    /// Replaces the field's input with a selection when its value is listed or empty.
+    pub fn set_options(&mut self, field: Field, options: Vec<Choice>) {
+        let Some(i) = field.list_index() else {
+            return;
+        };
+        let current = self.value(field);
+        let start = if current.is_empty() {
+            (!options.is_empty()).then_some(0)
+        } else {
+            options.iter().position(|c| c.value == current)
+        };
+        match start {
+            Some(index) => {
+                let mut widget = selection(field.title(), options);
+                widget.state.set_selection(index);
+                SetFocus::set_focused(&mut widget, self.focus == Slot::Input(field));
+                self.lists[i] = ListState::Loaded(widget);
+            }
+            None => {
+                self.lists[i] = ListState::NotListed;
+                self.set_title_suffix(field, " (not listed)");
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn has_selection(&self, field: Field) -> bool {
+        self.list(field).is_some()
+    }
+
+    fn list(&self, field: Field) -> Option<&ChoiceWidget> {
+        match field.list_index().map(|i| &self.lists[i]) {
+            Some(ListState::Loaded(widget)) => Some(widget),
+            _ => None,
+        }
+    }
+
+    fn list_mut(&mut self, field: Field) -> Option<&mut ChoiceWidget> {
+        match field.list_index().map(|i| &mut self.lists[i]) {
+            Some(ListState::Loaded(widget)) => Some(widget),
+            _ => None,
+        }
+    }
+
+    fn set_title_suffix(&mut self, field: Field, suffix: &str) {
+        self.fields[field.index()]
+            .widget
+            .set_title(Some(format!("{}{suffix}", field.title()).into()));
     }
 
     /// A dialog with `settings` loaded as editable values, credentials looked up in `user`.
@@ -406,8 +513,11 @@ impl ConfigDialog {
         self.remote_kind.state.values()[self.remote_kind.state.selection()]
     }
 
-    pub fn value(&self, field: Field) -> &str {
-        self.fields[field.index()].state.input()
+    pub fn value(&self, field: Field) -> String {
+        match self.list(field) {
+            Some(widget) => widget.state.get_value().value,
+            None => self.fields[field.index()].state.input().clone(),
+        }
     }
 
     #[cfg(test)]
@@ -456,6 +566,11 @@ impl ConfigDialog {
         for (field, widget) in Field::ALL.iter().zip(self.fields.iter_mut()) {
             SetFocus::set_focused(widget, slot == Slot::Input(*field));
         }
+        for field in [Field::BoardProject, Field::JiraProjectKey] {
+            if let Some(widget) = self.list_mut(field) {
+                SetFocus::set_focused(widget, slot == Slot::Input(field));
+            }
+        }
         self.focus = slot;
     }
 
@@ -489,9 +604,14 @@ impl ConfigDialog {
                     Slot::RemoteKind => {
                         self.remote_kind.handle_events(modifiers, code);
                     }
-                    Slot::Input(field) => {
-                        self.fields[field.index()].handle_events(modifiers, code);
-                    }
+                    Slot::Input(field) => match self.list_mut(field) {
+                        Some(widget) => {
+                            widget.handle_events(modifiers, code);
+                        }
+                        None => {
+                            self.fields[field.index()].handle_events(modifiers, code);
+                        }
+                    },
                 }
                 DialogEvent::Consumed
             }
@@ -550,8 +670,7 @@ impl ConfigDialog {
             &mut self.board_kind.state,
         );
         for (i, field) in board_fields.iter().enumerate() {
-            let w = &mut self.fields[field.index()];
-            StatefulWidget::render(&w.widget, left_rows[i + 1], buf, &mut w.state);
+            self.render_field(*field, left_rows[i + 1], buf);
         }
         let right_rows = Layout::vertical(rows(remote_fields.len())).split(right);
         StatefulWidget::render(
@@ -561,8 +680,7 @@ impl ConfigDialog {
             &mut self.remote_kind.state,
         );
         for (i, field) in remote_fields.iter().enumerate() {
-            let w = &mut self.fields[field.index()];
-            StatefulWidget::render(&w.widget, right_rows[i + 1], buf, &mut w.state);
+            self.render_field(*field, right_rows[i + 1], buf);
         }
 
         if let Some(message) = self.error() {
@@ -579,6 +697,17 @@ impl ConfigDialog {
             .render(keys, buf);
     }
 
+    /// The fetched selection when one is in place, else the input.
+    fn render_field(&mut self, field: Field, area: Rect, buf: &mut Buffer) {
+        match self.list_mut(field) {
+            Some(w) => StatefulWidget::render(&w.widget, area, buf, &mut w.state),
+            None => {
+                let w = &mut self.fields[field.index()];
+                StatefulWidget::render(&w.widget, area, buf, &mut w.state);
+            }
+        }
+    }
+
     /// The forms, or the first visible field that blocks confirming and why.
     fn forms(&self) -> Result<(BoardForm, RemoteForm), (Field, String)> {
         let need = |field: Field| -> Result<String, (Field, String)> {
@@ -586,7 +715,7 @@ impl ConfigDialog {
             if value.is_empty() {
                 Err((field, format!("{} is required", field.title())))
             } else {
-                Ok(value.to_string())
+                Ok(value)
             }
         };
         let board = match self.board_kind() {
@@ -1113,5 +1242,133 @@ mod tests {
             rows[title_row + 1]
         );
         assert!(!rows.join("\n").contains("GitHub") || d.remote_kind() == RemoteKind::Github);
+    }
+
+    fn choices(pairs: &[(&str, &str)]) -> Vec<Choice> {
+        pairs
+            .iter()
+            .map(|(v, l)| Choice {
+                value: v.to_string(),
+                label: l.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    /// TU-R-044 — the remote kind starts on the origin's host, GitHub otherwise.
+    fn ut_remote_kind_defaults_to_origin_host() {
+        let bb = Origin {
+            host: Kind::Bitbucket,
+            owner: "a".into(),
+            repo: "s".into(),
+        };
+        assert_eq!(
+            ConfigDialog::new(Some(&bb)).remote_kind(),
+            RemoteKind::Bitbucket
+        );
+        assert_eq!(
+            ConfigDialog::new(Some(&github_origin())).remote_kind(),
+            RemoteKind::Github
+        );
+        assert_eq!(ConfigDialog::new(None).remote_kind(), RemoteKind::Github);
+        assert_eq!(ConfigDialog::new(Some(&bb)).board_kind(), BoardKind::Github);
+    }
+
+    #[test]
+    /// TU-R-040 — a loading field stays an input with `(loading…)` in its title.
+    fn ut_loading_field_is_input_with_suffix() {
+        let mut d = ConfigDialog::new(None);
+        d.set_loading(Field::BoardProject);
+        assert!(!d.has_selection(Field::BoardProject));
+        let rows = crate::testkit::render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(rows.join("\n").contains("Project number (loading…)"));
+    }
+
+    #[test]
+    /// TU-R-041 — a failed fetch keeps the input, marks the title and shows the error.
+    fn ut_unavailable_field_shows_error() {
+        let mut d = ConfigDialog::new(None);
+        d.set_loading(Field::BoardProject);
+        d.set_unavailable(Field::BoardProject, "github: HTTP 401".into());
+        assert!(!d.has_selection(Field::BoardProject));
+        assert_eq!(d.error(), Some("github: HTTP 401"));
+        let rows = crate::testkit::render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        let joined = rows.join("\n");
+        assert!(
+            joined.contains("Project number (list unavailable)") && joined.contains("HTTP 401"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    /// TU-R-042 — the selection starts on the matching entry, or the first when empty.
+    fn ut_options_select_current_or_first() {
+        let mut d = ConfigDialog::new(None);
+        d.set_value(Field::BoardProject, "7");
+        d.set_options(
+            Field::BoardProject,
+            choices(&[("3", "3 Roadmap"), ("7", "7 Bugs")]),
+        );
+        assert!(d.has_selection(Field::BoardProject));
+        assert_eq!(d.value(Field::BoardProject), "7");
+        let mut d = ConfigDialog::new(None);
+        d.set_options(
+            Field::JiraProjectKey,
+            choices(&[("ACME", "ACME Acme"), ("OPS", "OPS Ops")]),
+        );
+        assert_eq!(d.value(Field::JiraProjectKey), "ACME");
+    }
+
+    #[test]
+    /// TU-R-042 — an unlisted value or an empty list keeps the input with `(not listed)`.
+    fn ut_options_keep_input_when_unlisted_or_empty() {
+        let mut d = ConfigDialog::new(None);
+        d.set_value(Field::BoardProject, "9");
+        d.set_options(Field::BoardProject, choices(&[("3", "3 Roadmap")]));
+        assert!(!d.has_selection(Field::BoardProject));
+        assert_eq!(d.value(Field::BoardProject), "9");
+        let rows = crate::testkit::render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(rows.join("\n").contains("Project number (not listed)"));
+        let mut d = ConfigDialog::new(None);
+        d.set_options(Field::JiraProjectKey, Vec::new());
+        assert!(!d.has_selection(Field::JiraProjectKey));
+    }
+
+    #[test]
+    /// TU-R-043, TU-R-038 — keys move the selection, the form carries the selected entry, and it renders.
+    fn ut_selection_drives_value_and_form() {
+        let mut d = ConfigDialog::new(None);
+        fill_github(&mut d);
+        d.set_options(
+            Field::BoardProject,
+            choices(&[("3", "3 Roadmap"), ("7", "7 Bugs")]),
+        );
+        assert_eq!(d.value(Field::BoardProject), "3");
+        for _ in 0..5 {
+            key(&mut d, KeyCode::BackTab);
+        }
+        assert_eq!(d.focus(), Slot::Input(Field::BoardProject));
+        key(&mut d, KeyCode::Down);
+        assert_eq!(d.value(Field::BoardProject), "7");
+        let rows = crate::testkit::render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(rows.join("\n").contains("7 Bugs"));
+        match key(&mut d, KeyCode::Enter) {
+            DialogEvent::Confirm(BoardForm::Github { project, .. }, _) => {
+                assert_eq!(project.get(), 7)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    /// TU-E-010 — a loaded selection belongs to its kind and survives switching kinds.
+    fn ut_selection_survives_kind_switch() {
+        let mut d = ConfigDialog::new(None);
+        d.set_options(Field::BoardProject, choices(&[("3", "3 Roadmap")]));
+        key(&mut d, KeyCode::Down); // Jira
+        assert!(!d.has_selection(Field::JiraProjectKey));
+        key(&mut d, KeyCode::Down); // GitHub
+        assert!(d.has_selection(Field::BoardProject));
+        assert_eq!(d.value(Field::BoardProject), "3");
     }
 }

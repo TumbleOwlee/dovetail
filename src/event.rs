@@ -4,11 +4,33 @@ use crossterm::event::{Event, KeyEventKind};
 use ferrowl_ui::DrawSurface;
 use tokio::sync::mpsc;
 
-use crate::app::App;
+use crate::app::{App, FetchRequest};
+use crate::atlassian::{self, AtlassianError, JiraProject};
+use crate::github::{self, GithubError, Project};
 
-/// Messages other tasks send to the loop. Empty until an integration needs one.
+/// Results other tasks send to the loop.
 #[derive(Debug)]
-pub enum Message {}
+pub enum Message {
+    GithubProjects(Result<Vec<Project>, GithubError>),
+    JiraProjects(Result<Vec<JiraProject>, AtlassianError>),
+}
+
+/// Performs one fetch and sends its outcome; a dropped receiver ends it silently.
+pub async fn dispatch(request: FetchRequest, client: reqwest::Client, tx: mpsc::Sender<Message>) {
+    let message = match request {
+        FetchRequest::GithubProjects { token, owner } => {
+            Message::GithubProjects(github::projects::list_projects(&client, &token, &owner).await)
+        }
+        FetchRequest::JiraProjects {
+            base_url,
+            email,
+            token,
+        } => Message::JiraProjects(
+            atlassian::projects::list_projects(&client, &base_url, &email, &token).await,
+        ),
+    };
+    let _ = tx.send(message).await;
+}
 
 /// Reads terminal events on a blocking thread into `tx` until the receiver is dropped.
 pub fn spawn_terminal_reader(tx: mpsc::Sender<Event>) {
@@ -26,9 +48,14 @@ pub async fn run<S: DrawSurface>(
     app: &mut App,
     screen: &mut S,
     mut events: mpsc::Receiver<Event>,
+    message_tx: mpsc::Sender<Message>,
     mut messages: mpsc::Receiver<Message>,
 ) -> std::io::Result<()> {
+    let client = reqwest::Client::new();
     loop {
+        for request in app.take_fetch_requests() {
+            tokio::spawn(dispatch(request, client.clone(), message_tx.clone()));
+        }
         screen.draw(|frame| app.render(frame))?;
         tokio::select! {
             event = events.recv() => match event {
@@ -39,7 +66,7 @@ pub async fn run<S: DrawSurface>(
                 None => break,
             },
             message = messages.recv() => match message {
-                Some(message) => match message {},
+                Some(message) => app.handle_message(message),
                 None => break,
             },
         }
@@ -89,7 +116,7 @@ mod tests {
         );
         let mut screen = TestSurface(Terminal::new(TestBackend::new(80, 24)).expect("backend"));
         let (tx, rx) = mpsc::channel(8);
-        let (_mtx, mrx) = mpsc::channel::<Message>(1);
+        let (mtx, mrx) = mpsc::channel::<Message>(1);
         // The first-run dialog is open: Esc quits it (TU-R-016).
         tx.send(Event::Key(KeyEvent::new(
             KeyCode::Char('c'),
@@ -98,8 +125,33 @@ mod tests {
         .await
         .expect("send");
         tx.send(key(KeyCode::Esc)).await.expect("send");
-        run(&mut app, &mut screen, rx, mrx).await.expect("loop");
+        run(&mut app, &mut screen, rx, mtx, mrx)
+            .await
+            .expect("loop");
         assert!(app.should_quit());
+    }
+
+    #[tokio::test]
+    /// AT-R-002, TU-R-041 — a fetch outcome travels back as a message, errors included.
+    async fn ut_dispatch_sends_outcome() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let (tx, mut rx) = mpsc::channel(1);
+        dispatch(
+            FetchRequest::JiraProjects {
+                base_url: format!("http://127.0.0.1:{port}"),
+                email: "e".into(),
+                token: "t".into(),
+            },
+            reqwest::Client::new(),
+            tx,
+        )
+        .await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(Message::JiraProjects(Err(AtlassianError::Http(_))))
+        ));
     }
 
     #[tokio::test]
@@ -117,10 +169,12 @@ mod tests {
         );
         let mut screen = TestSurface(Terminal::new(TestBackend::new(80, 24)).expect("backend"));
         let (tx, rx) = mpsc::channel(8);
-        let (_mtx, mrx) = mpsc::channel::<Message>(1);
+        let (mtx, mrx) = mpsc::channel::<Message>(1);
         tx.send(Event::Resize(10, 10)).await.expect("send");
         drop(tx);
-        run(&mut app, &mut screen, rx, mrx).await.expect("loop");
+        run(&mut app, &mut screen, rx, mtx, mrx)
+            .await
+            .expect("loop");
         assert!(!app.should_quit());
     }
 }

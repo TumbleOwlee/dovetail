@@ -28,3 +28,11 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 **TU-E-006** — Token and app-password fields render their content in plain text; no masking. Cites TU-R-008.
 **TU-E-007** — A terminal smaller than the dialog clips the dialog; it does not scroll. Cites TU-R-007.
 **TU-E-008** — Mouse input is not handled anywhere. Cites TU-R-004.
+
+## Option list boundaries
+
+| ID | Condition | Behavior |
+|---|---|---|
+| **TU-E-009** | The dialog opens on a first run, no credentials stored | No request is made; project fields are plain inputs; cites TU-R-038, TU-R-039 |
+| **TU-E-010** | The kind selection is changed after the list loaded | The loaded selection belongs to the kind it was fetched for and reappears with it; the other kind's field is a plain input; cites TU-R-042 |
+| **TU-E-011** | A response arrives after the dialog was closed | It is discarded; cites TU-R-038 |

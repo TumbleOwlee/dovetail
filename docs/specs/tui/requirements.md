@@ -56,3 +56,13 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **TU-R-034** — An unrecognised command shall show `unknown command: <input>` in the command line area until the next key press.
 **TU-R-035** — The `w` and `wr` commands with no repository settings shall show `not configured` in the command line area instead of writing.
 **TU-R-036** — A write failure from `w` or `wr` shall show the error in the command line area until the next key press.
+
+## Option lists in the configuration dialog
+
+**TU-R-038** — When the dialog opens and the board section's credentials resolve to a stored GitHub profile, the application shall request that owner's GitHub Projects and, on success, show the project field as a selection of `<number> <title>` entries instead of an input.
+**TU-R-039** — When the dialog opens and the board section's credentials resolve to a stored Jira profile, the application shall request that site's projects and, on success, show the project-key field as a selection of `<key> <name>` entries instead of an input.
+**TU-R-040** — While a request is outstanding, the field shall stay an input and its title shall end in `(loading…)`.
+**TU-R-041** — When a request fails, the field shall stay an input, its title shall end in `(list unavailable)`, and the dialog shall show the error message.
+**TU-R-042** — A selection replacing an input shall start on the entry matching the field's current value, or on the first entry when the field is empty; when the field is non-empty and no entry matches, or the list is empty, the field shall stay an input keeping its value with its title ending in `(not listed)`.
+**TU-R-043** — Confirming with a selection in place shall use the selected entry's number or key as the field's value.
+**TU-R-044** — When the dialog opens without stored settings, the board kind selection shall start on GitHub and the remote kind selection shall start on the `origin` remote's host when that host is GitHub or Bitbucket, GitHub otherwise.

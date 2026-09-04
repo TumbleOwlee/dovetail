@@ -13,6 +13,7 @@ ferrowl-ui = { git = "https://github.com/tumbleowlee/ferrowl", version = "0.6.1"
 getset = "0.1.7"
 itertools = "0.15.0"
 ratatui = "0.30.2"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"

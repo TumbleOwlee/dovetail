@@ -24,4 +24,6 @@ table rows included. Cite the governing requirement inline.
 **GH-E-002** — <what is deliberately not done>: <why>. Cites GH-R-0nn.
 -->
 
-*(Empty.)*
+## Known limitations — intentional constraints
+
+**GH-E-001** — Only the first 100 projects of an owner are listed; pagination is not followed. Cites GH-R-003.

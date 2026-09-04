@@ -19,3 +19,9 @@ heading text verbatim.
 
 **GH-R-001** — The <subject> shall <observable outcome> when <condition>.
 -->
+
+## Projects
+
+**GH-R-001** — The application shall list an owner's GitHub Projects (v2) through the GraphQL API, sending the token as a bearer token and querying `repositoryOwner(login)` for `projectsV2` nodes with `number` and `title`.
+**GH-R-002** — A non-success HTTP status, a GraphQL `errors` array, or a response missing the owner shall be a typed error carrying the status or the first message.
+**GH-R-003** — Listing shall request at most 100 projects; further pages are not fetched.
