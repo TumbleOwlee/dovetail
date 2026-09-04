@@ -3,13 +3,14 @@
 use serde::{Deserialize, Serialize};
 
 use super::board::Label;
+use super::files::{self, ChangedFile};
 use super::projects::GithubError;
 use super::pulls::PullState;
 use super::timeline::{self, TimelineItem};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
-const QUERY_HEAD: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number title body state isDraft url author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } } latestReviews(first: 20) { nodes { state author { login } } } assignees(first: 10) { nodes { login } } labels(first: 20) { nodes { name color } } projectItems(first: 10) { nodes { project { title } } } milestone { title } closingIssuesReferences(first: 10) { nodes { id number title } } participants(first: 20) { nodes { login } }";
+const QUERY_HEAD: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number title body state isDraft url author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } } latestReviews(first: 20) { nodes { state author { login } } } assignees(first: 10) { nodes { login } } labels(first: 20) { nodes { name color } } projectItems(first: 10) { nodes { project { title } } } milestone { title } closingIssuesReferences(first: 10) { nodes { id number title } } participants(first: 20) { nodes { login } } commits(first: 100) { nodes { commit { abbreviatedOid messageHeadline committedDate author { name user { login } } } } }";
 
 const QUERY_TAIL: &str = " } } }";
 
@@ -47,7 +48,22 @@ pub struct PullDetails {
     pub milestone: Option<String>,
     pub development: Vec<IssueRef>,
     pub participants: Vec<String>,
+    /// The first 100 commits, oldest first as GitHub lists them.
+    pub commits: Vec<Commit>,
+    /// Filled by `load_pull_request` from the REST files endpoint; empty in a parsed page.
+    pub files: Vec<ChangedFile>,
     pub timeline: Vec<TimelineItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit {
+    /// Abbreviated object id.
+    pub sha: String,
+    pub headline: String,
+    /// The GitHub login when known, else the git author name.
+    pub author: String,
+    /// Committed date, ISO 8601.
+    pub date: String,
 }
 
 /// One page of a details response: the details with this page's timeline items.
@@ -134,7 +150,28 @@ struct Node {
     milestone: Option<Milestone>,
     closing_issues_references: Nodes<IssueRef>,
     participants: Nodes<Author>,
+    commits: Nodes<CommitNode>,
     timeline_items: timeline::Connection,
+}
+
+#[derive(Deserialize)]
+struct CommitNode {
+    commit: CommitData,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitData {
+    abbreviated_oid: String,
+    message_headline: String,
+    committed_date: String,
+    author: Option<GitAuthor>,
+}
+
+#[derive(Deserialize)]
+struct GitAuthor {
+    name: Option<String>,
+    user: Option<Author>,
 }
 
 #[derive(Deserialize)]
@@ -272,6 +309,22 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
                 .into_iter()
                 .map(|a| a.login)
                 .collect(),
+            commits: node
+                .commits
+                .nodes
+                .into_iter()
+                .map(|c| {
+                    let c = c.commit;
+                    let author = c.author.and_then(|a| a.user.map(|u| u.login).or(a.name));
+                    Commit {
+                        sha: c.abbreviated_oid,
+                        headline: c.message_headline,
+                        author: author.unwrap_or_default(),
+                        date: c.committed_date,
+                    }
+                })
+                .collect(),
+            files: Vec::new(),
             timeline,
         },
         next_cursor,
@@ -307,7 +360,9 @@ pub async fn load_pull_request(
         }
         cursor = page.next_cursor;
         if cursor.is_none() {
-            return Ok(details.expect("the first page was stored above"));
+            let mut details = details.expect("the first page was stored above");
+            details.files = files::load_changed_files(client, token, owner, repo, number).await?;
+            return Ok(details);
         }
     }
 }
@@ -322,13 +377,14 @@ mod tests {
         "assignees":{"nodes":[{"login":"b"}]},"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},
         "projectItems":{"nodes":[{"project":{"title":"Roadmap"}}]},"milestone":{"title":"v1"},
         "closingIssuesReferences":{"nodes":[{"id":"I_7","number":7,"title":"Crash on start"}]},"participants":{"nodes":[{"login":"octo"},{"login":"a"}]},
+        "commits":{"nodes":[{"commit":{"abbreviatedOid":"abc1234","messageHeadline":"Fix crash","committedDate":"2026-09-03T10:00:00Z","author":{"name":"Octo Cat","user":{"login":"octo"}}}},{"commit":{"abbreviatedOid":"def5678","messageHeadline":"Add test","committedDate":"2026-09-04T10:00:00Z","author":{"name":"Anon","user":null}}}]},
         "timelineItems":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[
         {"__typename":"IssueComment","body":"LGTM","createdAt":"2026-09-04T10:00:00Z","author":{"login":"a"}},
         {"__typename":"MergedEvent","actor":null,"createdAt":"2026-09-05T10:00:00Z"}
     ]}}}}}"#;
 
     #[test]
-    /// GH-R-015 — the query asks for the pull request by number with its timeline page including merge and review events.
+    /// GH-R-015, GH-R-018 — the query asks for the pull request by number with its commits and its timeline page including merge and review events.
     fn ut_request_body_shape() {
         let body: serde_json::Value =
             serde_json::from_str(&request_body("o", "r", 5, Some("abc"))).expect("json");
@@ -348,6 +404,7 @@ mod tests {
             "milestone { title }",
             "closingIssuesReferences(first: 10) { nodes { id number title } }",
             "participants(first: 20) { nodes { login } }",
+            "commits(first: 100) { nodes { commit { abbreviatedOid messageHeadline committedDate author { name user { login } } } } }",
             "timelineItems(first: 100, after: $after, itemTypes: [ISSUE_COMMENT, ",
             "MERGED_EVENT, REVIEW_REQUESTED_EVENT, PULL_REQUEST_REVIEW,",
             "... on MergedEvent { actor { login } createdAt }",
@@ -358,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    /// GH-R-015, GH-R-017 — details and timeline items are carried, deleted authors are `None`, the cursor follows `hasNextPage`.
+    /// GH-R-015, GH-R-017, GH-R-018 — details, commits and timeline items are carried, deleted authors are `None`, the cursor follows `hasNextPage`.
     fn ut_parse_page() {
         let page = parse_page(BODY).expect("parses");
         assert_eq!(page.next_cursor.as_deref(), Some("cur"));
@@ -415,6 +472,23 @@ mod tests {
             }]
         );
         assert_eq!(d.participants, vec!["octo".to_string(), "a".to_string()]);
+        assert_eq!(
+            d.commits,
+            vec![
+                Commit {
+                    sha: "abc1234".into(),
+                    headline: "Fix crash".into(),
+                    author: "octo".into(),
+                    date: "2026-09-03T10:00:00Z".into()
+                },
+                Commit {
+                    sha: "def5678".into(),
+                    headline: "Add test".into(),
+                    author: "Anon".into(),
+                    date: "2026-09-04T10:00:00Z".into()
+                }
+            ]
+        );
         let bare = BODY.replace(r#""milestone":{"title":"v1"}"#, r#""milestone":null"#);
         assert_eq!(parse_page(&bare).expect("parses").details.milestone, None);
     }

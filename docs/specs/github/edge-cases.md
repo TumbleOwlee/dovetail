@@ -36,3 +36,5 @@ table rows included. Cite the governing requirement inline.
 **GH-E-007** — Only the first 10 projects, 20 sub-issues, 10 closing pull requests and 20 participants of an issue's details are loaded; their pagination is not followed. Cites GH-R-010.
 **GH-E-008** — A timeline item of a type outside GH-R-017, or one whose actor, assignee, reviewer or source is not a user, team, issue or pull request, is skipped rather than failing the load. Cites GH-R-017.
 **GH-E-009** — The issue timeline query spreads no fragment on a pull-request-only item type (merged, review requested, review): GitHub rejects such a fragment inside `IssueTimelineItems` even when the type filter excludes it. Cites GH-R-010.
+**GH-E-010** — A pull request with more than 100 commits shows the first 100 only. Cites GH-R-018.
+**GH-E-011** — A changed file without a `patch` field (binary, or a diff GitHub considers too large) is loaded with no patch; an unknown `status` value is loaded as `changed`. Cites GH-R-019.
