@@ -76,8 +76,9 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **TU-R-049** — When the application holds a GitHub board section whose credentials resolve to a stored profile, it shall request the board at start-up, after a confirmed configuration dialog, and on the `reload` command.
 **TU-R-050** — While the board request is outstanding, the Task Board tab body shall show a bordered box centered in the body reading `Board is loading..`; when it failed, the error message; when no request was possible, the configuration summary as before.
 **TU-R-051** — A loaded board shall render its columns side by side in order, each a bordered box spanning the full tab body height, titled with the column name and its card count, the columns sharing the width evenly.
-**TU-R-052** — Each card shall render as a bordered box with one column of horizontal margin between the border and the content, showing the title wrapped over as many lines as the content width requires, followed by one line of badges: one per label and one per assignee.
+**TU-R-052** — Each card shall render as a bordered box with one column of horizontal margin between the border and the content, showing the title wrapped over as many lines as the content width requires, followed by one line of label badges.
 **TU-R-053** — A label badge shall show the label name on a background of the label's color; an assignee badge shall show `@<login>`.
 **TU-R-054** — Exactly one card shall be selected, rendered with a highlighted border; `h` and `l` shall move the selection to the nearest card of the previous or next non-empty column, `j` and `k` to the previous or next card of the same column, all without wrapping.
 **TU-R-055** — A column shall scroll so that its selected card is visible.
 **TU-R-056** — The `reload` command shall request the board again when a request is possible, else show `not configured`.
+**TU-R-057** — A card's top border shall carry `#<number>` at its left corner and one assignee badge per assignee at its right corner.

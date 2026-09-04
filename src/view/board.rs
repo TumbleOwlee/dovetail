@@ -185,7 +185,22 @@ fn render_card(card: &Card, area: Rect, buf: &mut Buffer, highlighted: bool) {
     } else {
         Style::default().fg(COLOR_SCHEME.border).bg(COLOR_SCHEME.bg)
     };
-    let block = Block::bordered().style(border);
+    let mut assignees: Vec<Span> = Vec::new();
+    for (i, login) in card.assignees.iter().enumerate() {
+        if i > 0 {
+            assignees.push(Span::styled(" ", border));
+        }
+        assignees.push(Span::styled(
+            format!(" @{login} "),
+            Style::default()
+                .fg(COLOR_SCHEME.text_hi)
+                .bg(COLOR_SCHEME.hi_bg),
+        ));
+    }
+    let block = Block::bordered()
+        .style(border)
+        .title_top(Line::from(format!("#{}", card.number)).left_aligned())
+        .title_top(Line::from(assignees).right_aligned());
     let inner = block.inner(area).inner(Margin::new(1, 0));
     block.render(area, buf);
     let lines = wrap_title(&card.title, inner.width as usize);
@@ -204,15 +219,6 @@ fn render_card(card: &Card, area: Rect, buf: &mut Buffer, highlighted: bool) {
         spans.push(Span::styled(
             format!(" {} ", label.name),
             Style::default().fg(badge_text_color(bg)).bg(bg),
-        ));
-        spans.push(Span::raw(" "));
-    }
-    for login in &card.assignees {
-        spans.push(Span::styled(
-            format!(" @{login} "),
-            Style::default()
-                .fg(COLOR_SCHEME.text_hi)
-                .bg(COLOR_SCHEME.hi_bg),
         ));
         spans.push(Span::raw(" "));
     }
@@ -382,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-051, TU-R-052, TU-R-053 — bordered full-height columns titled with name and count; cards with title and badges.
+    /// TU-R-051, TU-R-052, TU-R-053, TU-R-057 — bordered full-height columns titled with name and count; cards with number and assignees in the top border, title and label badges inside.
     fn ut_render_columns_and_cards() {
         let v = BoardView::new(board());
         let rows = render_rows(200, 12, |f| v.render(f.area(), f.buffer_mut()));
@@ -403,13 +409,33 @@ mod tests {
             "{}",
             rows[2]
         );
+        let todo = rows[1]
+            .find("#1")
+            .expect("issue number in the top-left corner");
+        let done = rows[1]
+            .find("#3")
+            .expect("issue number in the top-left corner");
         assert!(
-            rows[3].contains("bug") && rows[3].contains("@octo"),
+            todo < rows[1].find("@octo").expect("assignee top-right"),
             "{}",
-            rows[3]
+            rows[1]
         );
+        assert!(rows[1].find("@octo").expect("octo") < done, "{}", rows[1]);
         assert!(
-            rows[3].contains("docs") && rows[3].contains("@a") && rows[3].contains("@b"),
+            rows[1].find("@a").expect("a") < rows[1].find("@b").expect("b"),
+            "{}",
+            rows[1]
+        );
+        assert!(rows[1].contains("┌#1"), "number at the corner: {}", rows[1]);
+        assert!(
+            rows[1].contains("@b ┐"),
+            "assignee at the corner: {}",
+            rows[1]
+        );
+        assert!(!rows[3].contains("@octo"), "{}", rows[3]);
+        assert!(rows[3].contains("bug"), "{}", rows[3]);
+        assert!(
+            rows[3].contains("docs") && rows[3].contains("good first issue"),
             "{}",
             rows[3]
         );
