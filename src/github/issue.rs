@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use super::board::{Assignee, Label, LabelNode, Nodes};
 use super::projects::GithubError;
+use super::pull::Comment;
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
-const QUERY: &str = "query($id: ID!) { node(id: $id) { __typename ... on Issue { title number state body url author { login } repository { nameWithOwner } labels(first: 10) { nodes { name color } } assignees(first: 5) { nodes { login } } } } }";
+const QUERY: &str = "query($id: ID!, $after: String) { node(id: $id) { __typename ... on Issue { title number state body url author { login } repository { nameWithOwner } labels(first: 10) { nodes { name color } } assignees(first: 5) { nodes { login } } projectItems(first: 10) { nodes { project { title } } } milestone { title } parent { number title } subIssues(first: 20) { nodes { number title } } closedByPullRequestsReferences(first: 10) { nodes { number title } } participants(first: 20) { nodes { login } } comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { body createdAt author { login } } } } } }";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -28,6 +29,22 @@ pub struct Issue {
     pub repository: String,
     pub labels: Vec<Label>,
     pub assignees: Vec<String>,
+    pub projects: Vec<String>,
+    pub milestone: Option<String>,
+    /// `parent #<number> <title>` then `sub #<number> <title>` lines.
+    pub relationships: Vec<String>,
+    /// Closing pull requests as `#<number> <title>`.
+    pub development: Vec<String>,
+    pub participants: Vec<String>,
+    pub comments: Vec<Comment>,
+}
+
+/// One page of a details response: the issue with this page's comments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page {
+    pub issue: Issue,
+    /// Cursor of the next comments page, `None` on the last page.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -39,13 +56,14 @@ struct Request<'a> {
 #[derive(Serialize)]
 struct Variables<'a> {
     id: &'a str,
+    after: Option<&'a str>,
 }
 
 /// The JSON body sent to the GraphQL endpoint.
-pub fn request_body(id: &str) -> String {
+pub fn request_body(id: &str, after: Option<&str>) -> String {
     serde_json::to_string(&Request {
         query: QUERY,
-        variables: Variables { id },
+        variables: Variables { id, after },
     })
     .expect("a request of plain values serializes")
 }
@@ -69,7 +87,7 @@ struct Data {
 #[derive(Deserialize)]
 #[serde(tag = "__typename")]
 enum Node {
-    Issue(IssueNode),
+    Issue(Box<IssueNode>),
     #[serde(other)]
     Other,
 }
@@ -86,6 +104,51 @@ struct IssueNode {
     repository: Repository,
     labels: Nodes<LabelNode>,
     assignees: Nodes<Assignee>,
+    project_items: Nodes<ProjectItem>,
+    milestone: Option<Titled>,
+    parent: Option<Ref>,
+    sub_issues: Nodes<Ref>,
+    closed_by_pull_requests_references: Nodes<Ref>,
+    participants: Nodes<Assignee>,
+    comments: Connection,
+}
+
+#[derive(Deserialize)]
+struct ProjectItem {
+    project: Titled,
+}
+
+#[derive(Deserialize)]
+struct Titled {
+    title: String,
+}
+
+#[derive(Deserialize)]
+struct Ref {
+    number: u64,
+    title: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Connection {
+    page_info: PageInfo,
+    nodes: Vec<CommentNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentNode {
+    body: String,
+    created_at: String,
+    author: Option<Author>,
 }
 
 #[derive(Deserialize)]
@@ -99,8 +162,8 @@ struct Repository {
     name_with_owner: String,
 }
 
-/// The issue from a GraphQL response body.
-pub fn parse_issue(body: &str) -> Result<Issue, GithubError> {
+/// The page from a GraphQL response body.
+pub fn parse_page(body: &str) -> Result<Page, GithubError> {
     let response: Response =
         serde_json::from_str(body).map_err(|e| GithubError::Decode(e.to_string()))?;
     if let Some(first) = response
@@ -112,25 +175,79 @@ pub fn parse_issue(body: &str) -> Result<Issue, GithubError> {
     let Some(Node::Issue(node)) = response.data.and_then(|d| d.node) else {
         return Err(GithubError::MissingIssue);
     };
-    Ok(Issue {
-        number: node.number,
-        title: node.title,
-        state: node.state,
-        body: node.body,
-        url: node.url,
-        author: node.author.map(|a| a.login),
-        repository: node.repository.name_with_owner,
-        labels: node
-            .labels
+    let next_cursor = Some(node.comments.page_info)
+        .filter(|p| p.has_next_page)
+        .and_then(|p| p.end_cursor);
+    let reference = |prefix: &str, r: Ref| format!("{prefix}#{} {}", r.number, r.title);
+    let mut relationships: Vec<String> = node
+        .parent
+        .into_iter()
+        .map(|r| reference("parent ", r))
+        .collect();
+    relationships.extend(
+        node.sub_issues
             .nodes
             .into_iter()
-            .map(|l| Label {
-                name: l.name,
-                color: l.color,
-            })
-            .collect(),
-        assignees: node.assignees.nodes.into_iter().map(|a| a.login).collect(),
+            .map(|r| reference("sub ", r)),
+    );
+    Ok(Page {
+        issue: Issue {
+            number: node.number,
+            title: node.title,
+            state: node.state,
+            body: node.body,
+            url: node.url,
+            author: node.author.map(|a| a.login),
+            repository: node.repository.name_with_owner,
+            labels: node
+                .labels
+                .nodes
+                .into_iter()
+                .map(|l| Label {
+                    name: l.name,
+                    color: l.color,
+                })
+                .collect(),
+            assignees: node.assignees.nodes.into_iter().map(|a| a.login).collect(),
+            projects: node
+                .project_items
+                .nodes
+                .into_iter()
+                .map(|p| p.project.title)
+                .collect(),
+            milestone: node.milestone.map(|m| m.title),
+            relationships,
+            development: node
+                .closed_by_pull_requests_references
+                .nodes
+                .into_iter()
+                .map(|r| reference("", r))
+                .collect(),
+            participants: node
+                .participants
+                .nodes
+                .into_iter()
+                .map(|a| a.login)
+                .collect(),
+            comments: node
+                .comments
+                .nodes
+                .into_iter()
+                .map(|c| Comment {
+                    author: c.author.map(|a| a.login),
+                    created_at: c.created_at,
+                    body: c.body,
+                })
+                .collect(),
+        },
+        next_cursor,
     })
+}
+
+/// The issue from a single-page GraphQL response body.
+#[cfg(test)]
+pub fn parse_issue(body: &str) -> Result<Issue, GithubError> {
+    parse_page(body).map(|p| p.issue)
 }
 
 pub async fn load_issue(
@@ -138,32 +255,50 @@ pub async fn load_issue(
     token: &str,
     id: &str,
 ) -> Result<Issue, GithubError> {
-    let response = client
-        .post(ENDPOINT)
-        .bearer_auth(token)
-        .header(reqwest::header::USER_AGENT, "prodgy")
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(request_body(id))
-        .send()
-        .await?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(GithubError::Status(status.as_u16()));
+    let mut issue: Option<Issue> = None;
+    let mut cursor: Option<String> = None;
+    loop {
+        let response = client
+            .post(ENDPOINT)
+            .bearer_auth(token)
+            .header(reqwest::header::USER_AGENT, "prodgy")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(request_body(id, cursor.as_deref()))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(GithubError::Status(status.as_u16()));
+        }
+        let page = parse_page(&response.text().await?)?;
+        match issue.as_mut() {
+            Some(issue) => issue.comments.extend(page.issue.comments),
+            None => issue = Some(page.issue),
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            return Ok(issue.expect("the first page was stored above"));
+        }
     }
-    parse_issue(&response.text().await?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const BODY: &str = r#"{"data":{"node":{"__typename":"Issue","title":"Crash on start","number":7,"state":"OPEN","body":"Steps:\n1. run\n2. boom","url":"https://github.com/o/r/issues/7","author":{"login":"octo"},"repository":{"nameWithOwner":"o/r"},"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},"assignees":{"nodes":[{"login":"a"}]}}}}"#;
+    const BODY: &str = r#"{"data":{"node":{"__typename":"Issue","title":"Crash on start","number":7,"state":"OPEN","body":"Steps:\n1. run\n2. boom","url":"https://github.com/o/r/issues/7","author":{"login":"octo"},"repository":{"nameWithOwner":"o/r"},"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},"assignees":{"nodes":[{"login":"a"}]},
+        "projectItems":{"nodes":[{"project":{"title":"Roadmap"}}]},"milestone":{"title":"v1"},
+        "parent":{"number":3,"title":"Epic"},"subIssues":{"nodes":[{"number":8,"title":"Child"}]},
+        "closedByPullRequestsReferences":{"nodes":[{"number":5,"title":"Fix crash"}]},"participants":{"nodes":[{"login":"octo"},{"login":"a"}]},
+        "comments":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[{"body":"LGTM","createdAt":"2026-09-04T10:00:00Z","author":{"login":"a"}}]}}}}"#;
 
     #[test]
     /// GH-R-010 — the query asks for the node by id with every detail field.
     fn ut_request_body_shape() {
-        let body: serde_json::Value = serde_json::from_str(&request_body("I_1")).expect("json");
+        let body: serde_json::Value =
+            serde_json::from_str(&request_body("I_1", Some("abc"))).expect("json");
         assert_eq!(body["variables"]["id"], "I_1");
+        assert_eq!(body["variables"]["after"], "abc");
         let query = body["query"].as_str().expect("query");
         for part in [
             "node(id: $id)",
@@ -174,6 +309,13 @@ mod tests {
             "repository { nameWithOwner }",
             "labels(first: 10)",
             "assignees(first: 5)",
+            "projectItems(first: 10) { nodes { project { title } } }",
+            "milestone { title }",
+            "parent { number title }",
+            "subIssues(first: 20) { nodes { number title } }",
+            "closedByPullRequestsReferences(first: 10) { nodes { number title } }",
+            "participants(first: 20) { nodes { login } }",
+            "comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { body createdAt author { login } } }",
         ] {
             assert!(query.contains(part), "{part} missing in {query}");
         }
@@ -200,6 +342,39 @@ mod tests {
             parse_issue(&closed).expect("parses").state,
             IssueState::Closed
         );
+    }
+
+    #[test]
+    /// GH-R-010 — sidebar fields and comments are carried; the cursor follows `hasNextPage`; missing parent and milestone are absent.
+    fn ut_parse_sidebar_and_comments() {
+        let page = parse_page(BODY).expect("parses");
+        assert_eq!(page.next_cursor.as_deref(), Some("cur"));
+        let issue = page.issue;
+        assert_eq!(issue.projects, vec!["Roadmap".to_string()]);
+        assert_eq!(issue.milestone.as_deref(), Some("v1"));
+        assert_eq!(
+            issue.relationships,
+            vec!["parent #3 Epic".to_string(), "sub #8 Child".to_string()]
+        );
+        assert_eq!(issue.development, vec!["#5 Fix crash".to_string()]);
+        assert_eq!(
+            issue.participants,
+            vec!["octo".to_string(), "a".to_string()]
+        );
+        assert_eq!(issue.comments.len(), 1);
+        assert_eq!(issue.comments[0].author.as_deref(), Some("a"));
+        assert_eq!(issue.comments[0].body, "LGTM");
+        let bare = BODY
+            .replace(r#""milestone":{"title":"v1"}"#, r#""milestone":null"#)
+            .replace(
+                r#""parent":{"number":3,"title":"Epic"}"#,
+                r#""parent":null"#,
+            )
+            .replace(r#""hasNextPage":true"#, r#""hasNextPage":false"#);
+        let page = parse_page(&bare).expect("parses");
+        assert_eq!(page.next_cursor, None);
+        assert_eq!(page.issue.milestone, None);
+        assert_eq!(page.issue.relationships, vec!["sub #8 Child".to_string()]);
     }
 
     #[test]

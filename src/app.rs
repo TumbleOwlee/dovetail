@@ -17,8 +17,8 @@ use crate::view::board::{self, BoardView};
 use crate::view::command_line::{CommandLine, CommandLineEvent};
 use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteForm};
 use crate::view::dialog::config::{Choice, Field};
-use crate::view::dialog::issue::{IssueDialog, IssueEvent};
-use crate::view::dialog::pull::{PullDialog, PullEvent};
+use crate::view::dialog::details::{DetailsDialog, DetailsEvent};
+use crate::view::dialog::{issue, pull};
 use crate::view::notice;
 use crate::view::remote::RemoteView;
 use crate::view::tabs::{self, Tab};
@@ -84,9 +84,9 @@ pub struct App {
     pub active_tab: Tab,
     pub dialog: Option<ConfigDialog>,
     /// The issue details overlay while open.
-    pub issue: Option<IssueDialog>,
+    pub issue: Option<DetailsDialog>,
     /// The pull request details overlay while open.
-    pub pull: Option<PullDialog>,
+    pub pull: Option<DetailsDialog>,
     pub command_line: CommandLine,
     pub board: BoardState,
     pub remote: RemoteState,
@@ -208,7 +208,11 @@ impl App {
             repo: repo.to_string(),
             number: pull.number,
         };
-        self.pull = Some(PullDialog::new(pull.number, pull.title.clone()));
+        self.pull = Some(DetailsDialog::new(
+            pull.number,
+            pull.title.clone(),
+            pull::LOADING,
+        ));
         self.pending_fetches.push(request);
     }
 
@@ -224,7 +228,11 @@ impl App {
             token: token.to_string(),
             id: card.id.clone(),
         };
-        self.issue = Some(IssueDialog::new(card.number, card.title.clone()));
+        self.issue = Some(DetailsDialog::new(
+            card.number,
+            card.title.clone(),
+            issue::LOADING,
+        ));
         self.pending_fetches.push(request);
     }
 
@@ -252,13 +260,13 @@ impl App {
         }
         if let Message::PullRequest(result) = message {
             if let Some(dialog) = self.pull.as_mut() {
-                dialog.set_result(result);
+                dialog.set_result(result.map(pull::content));
             }
             return;
         }
         if let Message::Issue(result) = message {
             if let Some(dialog) = self.issue.as_mut() {
-                dialog.set_result(result);
+                dialog.set_result(result.map(issue::content));
             }
             return;
         }
@@ -334,13 +342,13 @@ impl App {
             return;
         }
         if let Some(issue) = self.issue.as_mut() {
-            if issue.handle_key(code) == IssueEvent::Close {
+            if issue.handle_key(code) == DetailsEvent::Close {
                 self.issue = None;
             }
             return;
         }
         if let Some(pull) = self.pull.as_mut() {
-            if pull.handle_key(code) == PullEvent::Close {
+            if pull.handle_key(code) == DetailsEvent::Close {
                 self.pull = None;
             }
             return;
