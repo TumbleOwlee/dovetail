@@ -16,6 +16,7 @@ use crate::view::board::{self, BoardView};
 use crate::view::command_line::{CommandLine, CommandLineEvent};
 use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteForm};
 use crate::view::dialog::config::{Choice, Field};
+use crate::view::dialog::issue::{IssueDialog, IssueEvent};
 use crate::view::tabs::{self, Tab};
 
 /// A fetch the loop runs on the app's behalf, keyed by the credentials it needs.
@@ -34,6 +35,10 @@ pub enum FetchRequest {
         token: String,
         owner: String,
         number: u64,
+    },
+    Issue {
+        token: String,
+        id: String,
     },
 }
 
@@ -54,6 +59,8 @@ pub struct App {
     pub origin: Option<Origin>,
     pub active_tab: Tab,
     pub dialog: Option<ConfigDialog>,
+    /// The issue details overlay while open.
+    pub issue: Option<IssueDialog>,
     pub command_line: CommandLine,
     pub board: BoardState,
     pending_fetches: Vec<FetchRequest>,
@@ -84,6 +91,7 @@ impl App {
             origin,
             active_tab: Tab::Board,
             dialog,
+            issue: None,
             command_line: CommandLine::new(),
             board: BoardState::Unavailable,
             pending_fetches: Vec::new(),
@@ -95,28 +103,50 @@ impl App {
         app
     }
 
-    /// Queues a board request when the board is GitHub with stored credentials.
-    fn request_board(&mut self) -> bool {
-        let Some(settings) = &self.settings else {
-            return false;
-        };
+    /// The GitHub board's owner, project number and token when all are configured.
+    fn github_board(&self) -> Option<(&str, u64, &str)> {
+        let settings = self.settings.as_ref()?;
         let profile = settings
             .board
             .credentials()
             .and_then(|name| self.user_config.credentials.get(name));
-        let (Board::Github { owner, project, .. }, Some(Profile::Github { token })) =
-            (&settings.board, profile)
-        else {
+        match (&settings.board, profile) {
+            (Board::Github { owner, project, .. }, Some(Profile::Github { token })) => {
+                Some((owner, project.get(), token))
+            }
+            _ => None,
+        }
+    }
+
+    /// Queues a board request when the board is GitHub with stored credentials.
+    fn request_board(&mut self) -> bool {
+        let Some((owner, number, token)) = self.github_board() else {
             self.board = BoardState::Unavailable;
             return false;
         };
         self.pending_fetches.push(FetchRequest::Board {
-            token: token.clone(),
-            owner: owner.clone(),
-            number: project.get(),
+            token: token.to_string(),
+            owner: owner.to_string(),
+            number,
         });
         self.board = BoardState::Loading;
         true
+    }
+
+    /// Opens the details overlay for the selected card and queues its request.
+    fn open_issue(&mut self) {
+        let BoardState::Loaded(view) = &self.board else {
+            return;
+        };
+        let (Some(card), Some((_, _, token))) = (view.selected_card(), self.github_board()) else {
+            return;
+        };
+        let request = FetchRequest::Issue {
+            token: token.to_string(),
+            id: card.id.clone(),
+        };
+        self.issue = Some(IssueDialog::new(card.number, card.title.clone()));
+        self.pending_fetches.push(request);
     }
 
     /// Fetches queued since the last call, for the loop to run.
@@ -132,6 +162,12 @@ impl App {
                 Ok(board) => BoardState::Loaded(BoardView::new(board)),
                 Err(e) => BoardState::Failed(e.to_string()),
             };
+            return;
+        }
+        if let Message::Issue(result) = message {
+            if let Some(dialog) = self.issue.as_mut() {
+                dialog.set_result(result);
+            }
             return;
         }
         let Some(mut dialog) = self.waiting_dialog.take() else {
@@ -161,7 +197,7 @@ impl App {
             )),
             Message::GithubProjects(Err(e)) => Err(e.to_string()),
             Message::JiraProjects(Err(e)) => Err(e.to_string()),
-            Message::Board(_) => unreachable!("handled above"),
+            Message::Board(_) | Message::Issue(_) => unreachable!("handled above"),
         };
         match outcome {
             Ok((field, choices)) => {
@@ -200,6 +236,12 @@ impl App {
             }
             return;
         }
+        if let Some(issue) = self.issue.as_mut() {
+            if issue.handle_key(code) == IssueEvent::Close {
+                self.issue = None;
+            }
+            return;
+        }
         if self.command_line.is_open() {
             match self.command_line.handle_key(modifiers, code) {
                 CommandLineEvent::Consumed | CommandLineEvent::Cancel => {}
@@ -224,6 +266,9 @@ impl App {
             (KeyModifiers::CONTROL, KeyCode::Char('t')) => self.tab_prefix = true,
             (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(':')) => {
                 self.command_line.open();
+            }
+            (KeyModifiers::NONE, KeyCode::Enter) if self.active_tab == Tab::Board => {
+                self.open_issue();
             }
             (KeyModifiers::NONE, code) if self.active_tab == Tab::Board => {
                 if let BoardState::Loaded(view) = &mut self.board {
@@ -258,6 +303,9 @@ impl App {
             _ => tabs::render_body(middle, buf, &lines),
         }
         self.command_line.render(bottom, buf);
+        if let Some(issue) = self.issue.as_mut() {
+            issue.render(area, buf);
+        }
         if let Some(dialog) = self.dialog.as_mut() {
             dialog.render(area, buf);
         }
@@ -966,12 +1014,14 @@ mod tests {
                 name: "Todo".into(),
                 cards: vec![
                     crate::github::Card {
+                        id: "I_1".into(),
                         number: 1,
                         title: "First".into(),
                         labels: vec![],
                         assignees: vec![],
                     },
                     crate::github::Card {
+                        id: "I_2".into(),
                         number: 2,
                         title: "Second".into(),
                         labels: vec![],
@@ -1075,5 +1125,43 @@ mod tests {
                 number: 4
             }]
         );
+    }
+
+    #[test]
+    /// TU-R-059, TU-R-061, TU-E-020, TU-E-021 — Enter on a card requests its details and opens the overlay, which takes keys until closed; a late result is discarded.
+    fn ut_enter_opens_issue_details() {
+        let t = TempDir::new("issue");
+        let mut a = app(&t, Some(settings()));
+        a.take_fetch_requests();
+        key(&mut a, KeyCode::Enter);
+        assert!(
+            a.take_fetch_requests().is_empty() && a.issue.is_none(),
+            "no card yet"
+        );
+        a.handle_message(Message::Board(Ok(loaded_board())));
+        key(&mut a, KeyCode::Char('j'));
+        key(&mut a, KeyCode::Enter);
+        assert_eq!(
+            a.take_fetch_requests(),
+            vec![FetchRequest::Issue {
+                token: "t".into(),
+                id: "I_2".into()
+            }]
+        );
+        let rows = render_rows(80, 24, |f| a.render(f));
+        assert!(rows.iter().any(|r| r.contains("#2 Second")), "{rows:?}");
+        assert!(
+            rows.iter().any(|r| r.contains("Loading issue..")),
+            "{rows:?}"
+        );
+        key(&mut a, KeyCode::Char(':'));
+        assert!(!a.command_line.is_open(), "overlay takes the key");
+        key(&mut a, KeyCode::Esc);
+        assert!(a.issue.is_none());
+        a.handle_message(Message::Issue(Err(
+            crate::github::GithubError::MissingIssue,
+        )));
+        assert!(a.issue.is_none(), "late result discarded");
+        assert!(!a.quit);
     }
 }

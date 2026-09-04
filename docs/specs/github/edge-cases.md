@@ -30,3 +30,4 @@ table rows included. Cite the governing requirement inline.
 
 **GH-E-002** — Only 10 labels and 5 assignees per item are loaded; their pagination is not followed. Cites GH-R-006.
 **GH-E-003** — A project without a `Status` single-select field yields one `No status` column holding every item. Cites GH-R-005, GH-R-007.
+**GH-E-004** — Only 10 labels and 5 assignees of an issue's details are loaded; their pagination is not followed. Cites GH-R-010.

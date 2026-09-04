@@ -30,7 +30,9 @@ heading text verbatim.
 
 **GH-R-004** — The application shall load a project board through the GraphQL API by querying `repositoryOwner(login)`'s `projectV2(number)` for its title, its `Status` single-select field options, and its items, 100 per page, requesting the next page with the previous page's `endCursor` while `hasNextPage` is true and appending each page's cards to the columns of the first.
 **GH-R-005** — The board's columns shall be the `Status` field's options in the field's order, followed by a `No status` column.
-**GH-R-006** — Each item whose content is an issue shall become a card carrying the issue's title, number, label names with their colors, and assignee logins.
+**GH-R-006** — Each item whose content is an issue shall become a card carrying the issue's node id, title, number, label names with their colors, and assignee logins.
 **GH-R-007** — An item shall be placed in the column named by its `Status` value, or in `No status` when it has none or the name matches no option.
 **GH-R-008** — An item whose content is absent, a pull request, or a draft issue shall be skipped.
 **GH-R-009** — A project that does not exist, or a GraphQL error, shall be a typed error carrying the message.
+**GH-R-010** — The application shall load an issue's details through the GraphQL API by querying `node(id)` for its title, number, state, body, author login, URL, repository `nameWithOwner`, label names with their colors, and assignee logins.
+**GH-R-011** — A node that is absent or not an issue, or a GraphQL error, shall be a typed error carrying the message.

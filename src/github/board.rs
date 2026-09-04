@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::projects::GithubError;
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
-const QUERY: &str = "query($login: String!, $number: Int!, $after: String) { repositoryOwner(login: $login) { ... on ProjectV2Owner { projectV2(number: $number) { title field(name: \"Status\") { ... on ProjectV2SingleSelectField { options { name } } } items(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { fieldValueByName(name: \"Status\") { ... on ProjectV2ItemFieldSingleSelectValue { name } } content { __typename ... on Issue { title number labels(first: 10) { nodes { name color } } assignees(first: 5) { nodes { login } } } } } } } } } }";
+const QUERY: &str = "query($login: String!, $number: Int!, $after: String) { repositoryOwner(login: $login) { ... on ProjectV2Owner { projectV2(number: $number) { title field(name: \"Status\") { ... on ProjectV2SingleSelectField { options { name } } } items(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { fieldValueByName(name: \"Status\") { ... on ProjectV2ItemFieldSingleSelectValue { name } } content { __typename ... on Issue { id title number labels(first: 10) { nodes { name color } } assignees(first: 5) { nodes { login } } } } } } } } } }";
 
 /// A column of the board, named by a `Status` option.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +23,8 @@ pub struct Label {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
+    /// GraphQL node id, the key for the details request.
+    pub id: String,
     pub number: u64,
     pub title: String,
     pub labels: Vec<Label>,
@@ -121,6 +123,7 @@ struct StatusValue {
 #[serde(tag = "__typename")]
 enum Content {
     Issue {
+        id: String,
         title: String,
         number: u64,
         labels: Nodes<LabelNode>,
@@ -131,19 +134,19 @@ enum Content {
 }
 
 #[derive(Deserialize)]
-struct Nodes<T> {
-    nodes: Vec<T>,
+pub(super) struct Nodes<T> {
+    pub(super) nodes: Vec<T>,
 }
 
 #[derive(Deserialize)]
-struct LabelNode {
-    name: String,
-    color: String,
+pub(super) struct LabelNode {
+    pub(super) name: String,
+    pub(super) color: String,
 }
 
 #[derive(Deserialize)]
-struct Assignee {
-    login: String,
+pub(super) struct Assignee {
+    pub(super) login: String,
 }
 
 /// The JSON body sent to the GraphQL endpoint.
@@ -212,6 +215,7 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
         .and_then(|p| p.end_cursor);
     for item in project.items.nodes {
         let Some(Content::Issue {
+            id,
             title,
             number,
             labels,
@@ -225,6 +229,7 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
             .and_then(|name| columns[..last].iter().position(|c| c.name == name))
             .unwrap_or(last);
         columns[index].cards.push(Card {
+            id,
             number,
             title,
             labels: labels
@@ -291,11 +296,11 @@ mod tests {
     use super::*;
 
     const BODY: &str = r#"{"data":{"repositoryOwner":{"projectV2":{"title":"Roadmap","field":{"options":[{"name":"Todo"},{"name":"In Progress"},{"name":"Done"}]},"items":{"nodes":[
-        {"fieldValueByName":{"name":"Todo"},"content":{"__typename":"Issue","title":"First","number":1,"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},"assignees":{"nodes":[{"login":"octo"}]}}},
-        {"fieldValueByName":null,"content":{"__typename":"Issue","title":"Loose","number":2,"labels":{"nodes":[]},"assignees":{"nodes":[]}}},
+        {"fieldValueByName":{"name":"Todo"},"content":{"__typename":"Issue","id":"I_1","title":"First","number":1,"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},"assignees":{"nodes":[{"login":"octo"}]}}},
+        {"fieldValueByName":null,"content":{"__typename":"Issue","id":"I_2","title":"Loose","number":2,"labels":{"nodes":[]},"assignees":{"nodes":[]}}},
         {"fieldValueByName":{"name":"Done"},"content":{"__typename":"PullRequest","title":"PR","number":3}},
         {"fieldValueByName":{"name":"Done"},"content":{"__typename":"DraftIssue","title":"Draft"}},
-        {"fieldValueByName":{"name":"Gone"},"content":{"__typename":"Issue","title":"Orphan","number":4,"labels":{"nodes":[]},"assignees":{"nodes":[{"login":"a"},{"login":"b"}]}}},
+        {"fieldValueByName":{"name":"Gone"},"content":{"__typename":"Issue","id":"I_4","title":"Orphan","number":4,"labels":{"nodes":[]},"assignees":{"nodes":[{"login":"a"},{"login":"b"}]}}},
         {"fieldValueByName":null,"content":null}
     ]}}}}}"#;
 
@@ -309,6 +314,7 @@ mod tests {
             "projectV2(number: $number)",
             "field(name: \"Status\")",
             "items(first: 100, after: $after)",
+            "... on Issue { id title number",
             "pageInfo { hasNextPage endCursor }",
             "... on Issue",
         ] {
@@ -339,6 +345,7 @@ mod tests {
         assert_eq!(
             board.columns[0].cards[0],
             Card {
+                id: "I_1".into(),
                 number: 1,
                 title: "First".into(),
                 labels: vec![Label {
@@ -356,7 +363,7 @@ mod tests {
     #[test]
     /// GH-E-003 — no Status field: a single `No status` column holds everything.
     fn ut_missing_status_field_yields_no_status_only() {
-        let body = r#"{"data":{"repositoryOwner":{"projectV2":{"title":"T","field":null,"items":{"nodes":[{"fieldValueByName":null,"content":{"__typename":"Issue","title":"X","number":9,"labels":{"nodes":[]},"assignees":{"nodes":[]}}}]}}}}}"#;
+        let body = r#"{"data":{"repositoryOwner":{"projectV2":{"title":"T","field":null,"items":{"nodes":[{"fieldValueByName":null,"content":{"__typename":"Issue","id":"I_9","title":"X","number":9,"labels":{"nodes":[]},"assignees":{"nodes":[]}}}]}}}}}"#;
         let board = parse_board(body).expect("parses");
         assert_eq!(board.columns.len(), 1);
         assert_eq!(board.columns[0].name, "No status");

@@ -33,7 +33,6 @@ impl BoardView {
         self.selected
     }
 
-    #[cfg(test)]
     pub fn selected_card(&self) -> Option<&Card> {
         let (column, card) = self.selected?;
         self.board.columns.get(column)?.cards.get(card)
@@ -157,7 +156,7 @@ fn scroll_offset(heights: &[u16], selected: Option<usize>, height: u16) -> usize
 }
 
 /// Word-wrap `title` to `width` columns; a word wider than `width` is broken at the width.
-fn wrap_title(title: &str, width: usize) -> Vec<String> {
+pub fn wrap_title(title: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -266,6 +265,7 @@ mod tests {
 
     fn card(number: u64, title: &str, labels: &[(&str, &str)], assignees: &[&str]) -> Card {
         Card {
+            id: format!("I_{number}"),
             number,
             title: title.into(),
             labels: labels

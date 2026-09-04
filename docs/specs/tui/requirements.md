@@ -83,3 +83,6 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **TU-R-056** — The `reload` command shall request the board again when a request is possible, else show `not configured`.
 **TU-R-057** — A card's top border shall carry `#<number>` at its left corner and one assignee badge per assignee at its right corner.
 **TU-R-058** — Every view, including the ferrowl-ui widgets, shall paint on the background `#121212`; the board loading box border and text shall use the highlight color.
+**TU-R-059** — Enter on the Task Board tab with a selected card shall request that issue's details and open the details overlay, centered and covering most of the screen, reading `Loading issue..` until the details arrive, or the error message when the request failed.
+**TU-R-060** — The details overlay shall be titled `#<number> <title>` and show one line with the repository, the state and the author, the label and assignee badges, then the body wrapped to the overlay width; `j` and `k` shall scroll the body by one line without leaving its end.
+**TU-R-061** — Esc or `q` shall close the details overlay; while it is open it shall take every key before the command line and the board.

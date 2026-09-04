@@ -27,6 +27,8 @@ pub enum GithubError {
     MissingOwner,
     #[error("github: project not found")]
     MissingProject,
+    #[error("github: issue not found")]
+    MissingIssue,
     #[error("github: {0}")]
     Decode(String),
 }
