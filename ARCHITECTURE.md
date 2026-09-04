@@ -24,7 +24,7 @@ TUI application, stack: Rust (stable toolchain, pinned via `rust-toolchain.toml`
 | `view::command_line` | The `:` prompt, the help box above it while open, and the hint bar, error or notice shown while closed | `tui` |
 | `view::dialog::config` | The configuration dialog: kind selections, per-kind fields, validation, forms | `tui` |
 | `view::dialog::issue` | The issue details overlay: header, badges, scrolled body, loading and failure states | `tui` |
-| `view::dialog::pull` | The pull request details overlay: description card and comments card, scrolled together | `tui` |
+| `view::dialog::pull` | The pull request details overlay: description card and comments card scrolled together, a fixed-width bar of sidebar boxes at the right | `tui` |
 
 `board` has no code yet.
 

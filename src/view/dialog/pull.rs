@@ -3,12 +3,14 @@
 use crossterm::event::KeyCode;
 use ferrowl_ui::COLOR_SCHEME;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{HorizontalAlignment, Margin, Rect};
+use ratatui::layout::{Constraint, HorizontalAlignment, Layout, Margin, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 
-use crate::github::pull::PullDetails;
+use crate::github::pull::{PullDetails, ReviewState};
 use crate::view::board::wrap_title;
+use crate::view::board::{badge_text_color, label_color};
 use crate::view::theme;
 
 /// Screen cells left free around the overlay on each side.
@@ -16,6 +18,9 @@ const INSET: Margin = Margin::new(4, 1);
 
 /// Space between a card's border and its text.
 const CARD_MARGIN: Margin = Margin::new(1, 0);
+
+/// Columns of the bar at the overlay's right.
+const BAR_WIDTH: u16 = 30;
 
 /// What the caller does after a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +33,10 @@ pub enum PullEvent {
 enum Content {
     Loading,
     Failed(String),
-    Loaded { details: PullDetails, scroll: usize },
+    Loaded {
+        details: Box<PullDetails>,
+        scroll: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +59,10 @@ impl PullDialog {
     /// Replaces the loading state with the details or the failure.
     pub fn set_result(&mut self, result: Result<PullDetails, impl ToString>) {
         self.content = match result {
-            Ok(details) => Content::Loaded { details, scroll: 0 },
+            Ok(details) => Content::Loaded {
+                details: Box::new(details),
+                scroll: 0,
+            },
             Err(e) => Content::Failed(e.to_string()),
         };
     }
@@ -91,7 +102,13 @@ impl PullDialog {
             Content::Failed(message) => Paragraph::new(message.as_str())
                 .style(theme::on_bg(COLOR_SCHEME.error))
                 .render(inner, buf),
-            Content::Loaded { details, scroll } => render_cards(details, scroll, inner, buf),
+            Content::Loaded { details, scroll } => {
+                let [left, bar] =
+                    Layout::horizontal([Constraint::Min(0), Constraint::Length(BAR_WIDTH)])
+                        .areas(inner);
+                render_cards(details, scroll, left, buf);
+                render_bar(details, bar, buf);
+            }
         }
     }
 }
@@ -124,6 +141,75 @@ fn wrapped(text: &str, width: usize) -> impl Iterator<Item = Line<'static>> + '_
     text.lines()
         .flat_map(move |line| wrap_title(line, width))
         .map(Line::from)
+}
+
+fn review_state(state: ReviewState) -> &'static str {
+    match state {
+        ReviewState::Pending => "pending",
+        ReviewState::Approved => "approved",
+        ReviewState::ChangesRequested => "changes requested",
+        ReviewState::Commented => "commented",
+        ReviewState::Dismissed => "dismissed",
+    }
+}
+
+/// The seven boxes stacked top to bottom, each as tall as its entries, cut at the bottom.
+fn render_bar(details: &PullDetails, area: Rect, buf: &mut Buffer) {
+    let logins = |names: &[String]| -> Vec<Line<'static>> {
+        names.iter().map(|n| Line::raw(format!("@{n}"))).collect()
+    };
+    let reviewers = details
+        .reviewers
+        .iter()
+        .map(|r| {
+            Line::from(vec![
+                Span::raw(format!("@{} ", r.name)),
+                Span::styled(
+                    review_state(r.state),
+                    theme::on_bg(COLOR_SCHEME.placeholder),
+                ),
+            ])
+        })
+        .collect();
+    let labels = details
+        .labels
+        .iter()
+        .map(|l| {
+            let bg = label_color(&l.color).unwrap_or(COLOR_SCHEME.hi_bg);
+            Line::from(Span::styled(
+                format!(" {} ", l.name),
+                Style::default().fg(badge_text_color(bg)).bg(bg),
+            ))
+        })
+        .collect();
+    let plain = |items: &[String]| -> Vec<Line<'static>> {
+        items.iter().map(|i| Line::raw(i.clone())).collect()
+    };
+    let boxes: [(&str, Vec<Line<'static>>); 7] = [
+        ("Reviewers", reviewers),
+        ("Assignees", logins(&details.assignees)),
+        ("Labels", labels),
+        ("Projects", plain(&details.projects)),
+        ("Milestone", plain(details.milestone.as_slice())),
+        ("Development", plain(&details.development)),
+        ("Participants", logins(&details.participants)),
+    ];
+    let mut y = area.y;
+    for (title, mut lines) in boxes {
+        if lines.is_empty() {
+            lines.push(Line::styled("None", theme::on_bg(COLOR_SCHEME.placeholder)));
+        }
+        let card = CardText {
+            title: format!(" {title} "),
+            lines,
+        };
+        let height = card.height().min(area.bottom().saturating_sub(y));
+        if height < 2 {
+            break;
+        }
+        card.render(Rect::new(area.x, y, area.width, height), buf);
+        y += height;
+    }
 }
 
 /// Both cards stacked in a buffer as tall as they need, scrolled into `area`.
@@ -181,7 +267,8 @@ fn render_cards(details: &PullDetails, scroll: &mut usize, area: Rect, buf: &mut
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::pull::Comment;
+    use crate::github::board::Label;
+    use crate::github::pull::{Comment, ReviewState, Reviewer};
     use crate::github::pulls::PullState;
     use crate::testkit::render_rows;
 
@@ -195,7 +282,116 @@ mod tests {
             url: "https://github.com/o/r/pull/5".into(),
             author: Some("octo".into()),
             comments,
+            ..PullDetails::default()
         }
+    }
+
+    #[test]
+    /// TU-R-068, TU-E-026 — a 30 column bar at the right stacks the seven boxes, `None` for empty ones, clipped at the bottom.
+    fn ut_right_bar_boxes() {
+        let mut d = PullDialog::new(5, "Fix crash".into());
+        let mut full = details("body", vec![]);
+        full.reviewers = vec![
+            Reviewer {
+                name: "rev".into(),
+                state: ReviewState::Pending,
+            },
+            Reviewer {
+                name: "a".into(),
+                state: ReviewState::ChangesRequested,
+            },
+        ];
+        full.assignees = vec!["b".into()];
+        full.labels = vec![Label {
+            name: "bug".into(),
+            color: "d73a4a".into(),
+        }];
+        full.projects = vec!["Roadmap".into()];
+        full.milestone = Some("v1".into());
+        full.development = vec!["#7 Crash on start".into()];
+        full.participants = vec!["octo".into(), "a".into()];
+        d.set_result(Ok::<_, String>(full));
+        let rows = render_rows(100, 40, |f| d.render(f.area(), f.buffer_mut()));
+        let bar_left = 100 - 4 - 1 - 30;
+        let bar: Vec<String> = rows
+            .iter()
+            .map(|r| r.chars().skip(bar_left).take(30).collect())
+            .collect();
+        let titles = [
+            "Reviewers",
+            "Assignees",
+            "Labels",
+            "Projects",
+            "Milestone",
+            "Development",
+            "Participants",
+        ];
+        let mut last = 0;
+        for title in titles {
+            let at = bar
+                .iter()
+                .position(|r| r.contains(title))
+                .unwrap_or_else(|| panic!("{title}: {bar:?}"));
+            assert!(
+                at > last || last == 0,
+                "{title} below the previous box: {bar:?}"
+            );
+            last = at;
+        }
+        let at = |text: &str| {
+            bar.iter()
+                .position(|r| r.contains(text))
+                .unwrap_or_else(|| panic!("{text}: {bar:?}"))
+        };
+        assert!(bar[at("@rev")].contains("pending"), "{}", bar[at("@rev")]);
+        assert!(
+            bar[at("@a ")].contains("changes requested"),
+            "{}",
+            bar[at("@a ")]
+        );
+        assert!(bar.iter().any(|r| r.contains("@b")), "{bar:?}");
+        assert!(bar.iter().any(|r| r.contains("bug")), "{bar:?}");
+        assert!(bar.iter().any(|r| r.contains("Roadmap")), "{bar:?}");
+        assert!(bar.iter().any(|r| r.contains("v1")), "{bar:?}");
+        assert!(
+            bar.iter().any(|r| r.contains("#7 Crash on start")),
+            "{bar:?}"
+        );
+        assert!(bar.iter().any(|r| r.contains("@octo")), "{bar:?}");
+        assert!(
+            rows.iter().any(|r| r.contains("Comments (0)")),
+            "left content still there: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("Fix crash") && r.find("Fix crash").expect("title") < bar_left),
+            "{rows:?}"
+        );
+
+        let mut d = PullDialog::new(5, "T".into());
+        d.set_result(Ok::<_, String>(details("body", vec![])));
+        let rows = render_rows(100, 40, |f| d.render(f.area(), f.buffer_mut()));
+        let bar: Vec<String> = rows
+            .iter()
+            .map(|r| r.chars().skip(bar_left).take(30).collect())
+            .collect();
+        assert_eq!(
+            bar.iter().filter(|r| r.contains("None")).count(),
+            7,
+            "{bar:?}"
+        );
+
+        let rows = render_rows(100, 12, |f| d.render(f.area(), f.buffer_mut()));
+        let bar: Vec<String> = rows
+            .iter()
+            .map(|r| r.chars().skip(bar_left).take(30).collect())
+            .collect();
+        assert!(bar.iter().any(|r| r.contains("Reviewers")), "{bar:?}");
+        assert!(
+            !bar.iter().any(|r| r.contains("Participants")),
+            "clipped: {bar:?}"
+        );
+        assert!(rows.iter().all(|r| r.chars().count() <= 100), "{rows:?}");
     }
 
     fn comment(author: Option<&str>, body: &str) -> Comment {
@@ -242,7 +438,10 @@ mod tests {
             .expect("description card title");
         assert!(rows[card + 1].contains("Fix crash"), "{}", rows[card + 1]);
         assert!(
-            rows[card + 2].chars().all(|c| c == '│' || c == ' '),
+            rows[card + 2]
+                .chars()
+                .take(44)
+                .all(|c| c == '│' || c == ' '),
             "empty line: {}",
             rows[card + 2]
         );
@@ -270,6 +469,7 @@ mod tests {
         assert!(
             rows[comments_card + 3]
                 .chars()
+                .take(44)
                 .all(|c| c == '│' || c == ' '),
             "{}",
             rows[comments_card + 3]

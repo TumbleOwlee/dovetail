@@ -2,14 +2,32 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::board::Label;
 use super::projects::GithubError;
 use super::pulls::PullState;
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
-const QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number title body state isDraft url author { login } comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { body createdAt author { login } } } } } }";
+const QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number title body state isDraft url author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } } latestReviews(first: 20) { nodes { state author { login } } } assignees(first: 10) { nodes { login } } labels(first: 20) { nodes { name color } } projectItems(first: 10) { nodes { project { title } } } milestone { title } closingIssuesReferences(first: 10) { nodes { number title } } participants(first: 20) { nodes { login } } comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { body createdAt author { login } } } } } }";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ReviewState {
+    Pending,
+    Approved,
+    ChangesRequested,
+    Commented,
+    Dismissed,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reviewer {
+    /// A user login or a team name.
+    pub name: String,
+    pub state: ReviewState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Comment {
     /// `None` when the author account was deleted.
     pub author: Option<String>,
@@ -18,7 +36,7 @@ pub struct Comment {
     pub body: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PullDetails {
     pub number: u64,
     pub title: String,
@@ -27,6 +45,15 @@ pub struct PullDetails {
     pub draft: bool,
     pub url: String,
     pub author: Option<String>,
+    /// Requested reviewers first, then those with a latest review.
+    pub reviewers: Vec<Reviewer>,
+    pub assignees: Vec<String>,
+    pub labels: Vec<Label>,
+    pub projects: Vec<String>,
+    pub milestone: Option<String>,
+    /// Closing issue references as `#<number> <title>`.
+    pub development: Vec<String>,
+    pub participants: Vec<String>,
     pub comments: Vec<Comment>,
 }
 
@@ -98,7 +125,72 @@ struct Node {
     is_draft: bool,
     url: String,
     author: Option<Author>,
+    review_requests: Nodes<ReviewRequest>,
+    latest_reviews: Nodes<Review>,
+    assignees: Nodes<Author>,
+    labels: Nodes<LabelNode>,
+    project_items: Nodes<ProjectItem>,
+    milestone: Option<Milestone>,
+    closing_issues_references: Nodes<IssueRef>,
+    participants: Nodes<Author>,
     comments: Connection,
+}
+
+#[derive(Deserialize)]
+struct Nodes<T> {
+    nodes: Vec<T>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewRequest {
+    requested_reviewer: Option<RequestedReviewer>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "__typename")]
+enum RequestedReviewer {
+    User {
+        login: String,
+    },
+    Team {
+        name: String,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
+struct Review {
+    state: ReviewState,
+    author: Option<Author>,
+}
+
+#[derive(Deserialize)]
+struct LabelNode {
+    name: String,
+    color: String,
+}
+
+#[derive(Deserialize)]
+struct ProjectItem {
+    project: ProjectTitle,
+}
+
+#[derive(Deserialize)]
+struct ProjectTitle {
+    title: String,
+}
+
+#[derive(Deserialize)]
+struct Milestone {
+    title: String,
+}
+
+#[derive(Deserialize)]
+struct IssueRef {
+    number: u64,
+    title: String,
 }
 
 #[derive(Deserialize)]
@@ -158,6 +250,24 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
             body: c.body,
         })
         .collect();
+    let mut reviewers: Vec<Reviewer> = node
+        .review_requests
+        .nodes
+        .into_iter()
+        .filter_map(|r| match r.requested_reviewer? {
+            RequestedReviewer::User { login } => Some(login),
+            RequestedReviewer::Team { name } => Some(name),
+            RequestedReviewer::Other => None,
+        })
+        .map(|name| Reviewer {
+            name,
+            state: ReviewState::Pending,
+        })
+        .collect();
+    reviewers.extend(node.latest_reviews.nodes.into_iter().map(|r| Reviewer {
+        name: r.author.map_or_else(|| "ghost".to_string(), |a| a.login),
+        state: r.state,
+    }));
     Ok(Page {
         details: PullDetails {
             number: node.number,
@@ -167,6 +277,36 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
             draft: node.is_draft,
             url: node.url,
             author: node.author.map(|a| a.login),
+            reviewers,
+            assignees: node.assignees.nodes.into_iter().map(|a| a.login).collect(),
+            labels: node
+                .labels
+                .nodes
+                .into_iter()
+                .map(|l| Label {
+                    name: l.name,
+                    color: l.color,
+                })
+                .collect(),
+            projects: node
+                .project_items
+                .nodes
+                .into_iter()
+                .map(|p| p.project.title)
+                .collect(),
+            milestone: node.milestone.map(|m| m.title),
+            development: node
+                .closing_issues_references
+                .nodes
+                .into_iter()
+                .map(|i| format!("#{} {}", i.number, i.title))
+                .collect(),
+            participants: node
+                .participants
+                .nodes
+                .into_iter()
+                .map(|a| a.login)
+                .collect(),
             comments,
         },
         next_cursor,
@@ -211,7 +351,13 @@ pub async fn load_pull_request(
 mod tests {
     use super::*;
 
-    const BODY: &str = r#"{"data":{"repository":{"pullRequest":{"number":5,"title":"Fix crash","body":"Fixes #7","state":"OPEN","isDraft":false,"url":"https://github.com/o/r/pull/5","author":{"login":"octo"},"comments":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[
+    const BODY: &str = r#"{"data":{"repository":{"pullRequest":{"number":5,"title":"Fix crash","body":"Fixes #7","state":"OPEN","isDraft":false,"url":"https://github.com/o/r/pull/5","author":{"login":"octo"},
+        "reviewRequests":{"nodes":[{"requestedReviewer":{"__typename":"User","login":"rev"}},{"requestedReviewer":{"__typename":"Team","name":"core"}},{"requestedReviewer":null}]},
+        "latestReviews":{"nodes":[{"state":"APPROVED","author":{"login":"a"}},{"state":"CHANGES_REQUESTED","author":null}]},
+        "assignees":{"nodes":[{"login":"b"}]},"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},
+        "projectItems":{"nodes":[{"project":{"title":"Roadmap"}}]},"milestone":{"title":"v1"},
+        "closingIssuesReferences":{"nodes":[{"number":7,"title":"Crash on start"}]},"participants":{"nodes":[{"login":"octo"},{"login":"a"}]},
+        "comments":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[
         {"body":"LGTM","createdAt":"2026-09-04T10:00:00Z","author":{"login":"a"}},
         {"body":"gone","createdAt":"2026-09-03T10:00:00Z","author":null}
     ]}}}}}"#;
@@ -229,6 +375,14 @@ mod tests {
         for part in [
             "pullRequest(number: $number)",
             "number title body state isDraft url author { login }",
+            "reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } }",
+            "latestReviews(first: 20) { nodes { state author { login } } }",
+            "assignees(first: 10) { nodes { login } }",
+            "labels(first: 20) { nodes { name color } }",
+            "projectItems(first: 10) { nodes { project { title } } }",
+            "milestone { title }",
+            "closingIssuesReferences(first: 10) { nodes { number title } }",
+            "participants(first: 20) { nodes { login } }",
             "comments(first: 100, after: $after)",
             "pageInfo { hasNextPage endCursor }",
             "nodes { body createdAt author { login } }",
@@ -267,6 +421,34 @@ mod tests {
         );
         let last = BODY.replace(r#""hasNextPage":true"#, r#""hasNextPage":false"#);
         assert_eq!(parse_page(&last).expect("parses").next_cursor, None);
+    }
+
+    #[test]
+    /// GH-R-015 — sidebar fields: requested users and teams as pending, latest reviews with state, a deleted reviewer as ghost; a missing milestone is `None`.
+    fn ut_parse_sidebar_fields() {
+        let d = parse_page(BODY).expect("parses").details;
+        let reviewers: Vec<(&str, ReviewState)> = d
+            .reviewers
+            .iter()
+            .map(|r| (r.name.as_str(), r.state))
+            .collect();
+        assert_eq!(
+            reviewers,
+            vec![
+                ("rev", ReviewState::Pending),
+                ("core", ReviewState::Pending),
+                ("a", ReviewState::Approved),
+                ("ghost", ReviewState::ChangesRequested),
+            ]
+        );
+        assert_eq!(d.assignees, vec!["b".to_string()]);
+        assert_eq!(d.labels[0].name, "bug");
+        assert_eq!(d.projects, vec!["Roadmap".to_string()]);
+        assert_eq!(d.milestone.as_deref(), Some("v1"));
+        assert_eq!(d.development, vec!["#7 Crash on start".to_string()]);
+        assert_eq!(d.participants, vec!["octo".to_string(), "a".to_string()]);
+        let bare = BODY.replace(r#""milestone":{"title":"v1"}"#, r#""milestone":null"#);
+        assert_eq!(parse_page(&bare).expect("parses").details.milestone, None);
     }
 
     #[test]

@@ -55,3 +55,4 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-023** | The repository has no pull requests | The table shows only its header; cites TU-R-063 |
 | **TU-E-024** | A pull request has no comments | The comments card reads `No comments`; cites TU-R-066 |
 | **TU-E-025** | Pull request details arrive after the overlay was closed | Discarded; cites TU-R-065 |
+| **TU-E-026** | The right bar's boxes need more rows than the overlay has | Later boxes are cut off at the bottom; the left content still scrolls; cites TU-R-068 |
