@@ -65,20 +65,39 @@ pub struct TimelineItem {
     pub event: Event,
 }
 
-/// Selection of the `timelineItems` connection: field text after `timelineItems(`, item types
-/// common to issues and pull requests.
-pub const ISSUE_ITEM_TYPES: &str = "[ISSUE_COMMENT, ASSIGNED_EVENT, UNASSIGNED_EVENT, LABELED_EVENT, UNLABELED_EVENT, MILESTONED_EVENT, DEMILESTONED_EVENT, CLOSED_EVENT, REOPENED_EVENT, RENAMED_TITLE_EVENT, REFERENCED_EVENT, CROSS_REFERENCED_EVENT]";
+/// Which kind of node owns the timeline. Pull requests carry three item types issues lack,
+/// and GitHub rejects a fragment on any of them inside an issue timeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owner {
+    Issue,
+    Pull,
+}
 
-/// Item types of a pull request: the issue ones plus merge and review events.
-pub const PULL_ITEM_TYPES: &str = "[ISSUE_COMMENT, ASSIGNED_EVENT, UNASSIGNED_EVENT, LABELED_EVENT, UNLABELED_EVENT, MILESTONED_EVENT, DEMILESTONED_EVENT, CLOSED_EVENT, REOPENED_EVENT, RENAMED_TITLE_EVENT, MERGED_EVENT, REVIEW_REQUESTED_EVENT, PULL_REQUEST_REVIEW, REFERENCED_EVENT, CROSS_REFERENCED_EVENT]";
+/// Item types common to issues and pull requests.
+const ISSUE_ITEM_TYPES: &str = "[ISSUE_COMMENT, ASSIGNED_EVENT, UNASSIGNED_EVENT, LABELED_EVENT, UNLABELED_EVENT, MILESTONED_EVENT, DEMILESTONED_EVENT, CLOSED_EVENT, REOPENED_EVENT, RENAMED_TITLE_EVENT, REFERENCED_EVENT, CROSS_REFERENCED_EVENT]";
 
-/// The node selection of the connection, the same for both.
-pub const NODE_SELECTION: &str = "pageInfo { hasNextPage endCursor } nodes { __typename ... on IssueComment { author { login } createdAt body } ... on AssignedEvent { actor { login } createdAt assignee { __typename ... on User { login } } } ... on UnassignedEvent { actor { login } createdAt assignee { __typename ... on User { login } } } ... on LabeledEvent { actor { login } createdAt label { name color } } ... on UnlabeledEvent { actor { login } createdAt label { name color } } ... on MilestonedEvent { actor { login } createdAt milestoneTitle } ... on DemilestonedEvent { actor { login } createdAt milestoneTitle } ... on ClosedEvent { actor { login } createdAt stateReason } ... on ReopenedEvent { actor { login } createdAt } ... on RenamedTitleEvent { actor { login } createdAt previousTitle currentTitle } ... on MergedEvent { actor { login } createdAt } ... on ReviewRequestedEvent { actor { login } createdAt requestedReviewer { __typename ... on User { login } ... on Team { name } } } ... on PullRequestReview { author { login } createdAt state body } ... on ReferencedEvent { actor { login } createdAt commit { abbreviatedOid messageHeadline } } ... on CrossReferencedEvent { actor { login } createdAt source { __typename ... on Issue { number title repository { nameWithOwner } } ... on PullRequest { number title repository { nameWithOwner } } } } }";
+/// The issue item types plus merge and review events.
+const PULL_ITEM_TYPES: &str = "[ISSUE_COMMENT, ASSIGNED_EVENT, UNASSIGNED_EVENT, LABELED_EVENT, UNLABELED_EVENT, MILESTONED_EVENT, DEMILESTONED_EVENT, CLOSED_EVENT, REOPENED_EVENT, RENAMED_TITLE_EVENT, MERGED_EVENT, REVIEW_REQUESTED_EVENT, PULL_REQUEST_REVIEW, REFERENCED_EVENT, CROSS_REFERENCED_EVENT]";
+
+/// Node fragments common to issues and pull requests.
+const COMMON_FRAGMENTS: &str = "... on IssueComment { author { login } createdAt body } ... on AssignedEvent { actor { login } createdAt assignee { __typename ... on User { login } } } ... on UnassignedEvent { actor { login } createdAt assignee { __typename ... on User { login } } } ... on LabeledEvent { actor { login } createdAt label { name color } } ... on UnlabeledEvent { actor { login } createdAt label { name color } } ... on MilestonedEvent { actor { login } createdAt milestoneTitle } ... on DemilestonedEvent { actor { login } createdAt milestoneTitle } ... on ClosedEvent { actor { login } createdAt stateReason } ... on ReopenedEvent { actor { login } createdAt } ... on RenamedTitleEvent { actor { login } createdAt previousTitle currentTitle } ... on ReferencedEvent { actor { login } createdAt commit { abbreviatedOid messageHeadline } } ... on CrossReferencedEvent { actor { login } createdAt source { __typename ... on Issue { number title repository { nameWithOwner } } ... on PullRequest { number title repository { nameWithOwner } } } }";
+
+/// Node fragments that only exist on a pull request timeline.
+const PULL_FRAGMENTS: &str = "... on MergedEvent { actor { login } createdAt } ... on ReviewRequestedEvent { actor { login } createdAt requestedReviewer { __typename ... on User { login } ... on Team { name } } } ... on PullRequestReview { author { login } createdAt state body }";
 
 /// The `timelineItems` field for a query with an `$after` variable.
-pub fn selection(item_types: &str) -> String {
+pub fn selection(owner: Owner) -> String {
+    let (item_types, extra) = match owner {
+        Owner::Issue => (ISSUE_ITEM_TYPES, ""),
+        Owner::Pull => (PULL_ITEM_TYPES, PULL_FRAGMENTS),
+    };
+    let extra = if extra.is_empty() {
+        String::new()
+    } else {
+        format!(" {extra}")
+    };
     format!(
-        "timelineItems(first: 100, after: $after, itemTypes: {item_types}) {{ {NODE_SELECTION} }}"
+        "timelineItems(first: 100, after: $after, itemTypes: {item_types}) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ __typename {COMMON_FRAGMENTS}{extra} }} }}"
     )
 }
 
@@ -518,9 +537,10 @@ mod tests {
     }
 
     #[test]
-    /// GH-R-010, GH-R-015 — the selection carries the type filter and every node fragment.
+    /// GH-R-010, GH-R-015, GH-E-009 — the selection carries the type filter and every node
+    /// fragment; the issue selection spreads no pull-only fragment.
     fn ut_selection_text() {
-        let pull = selection(PULL_ITEM_TYPES);
+        let pull = selection(Owner::Pull);
         assert!(
             pull.starts_with(
                 "timelineItems(first: 100, after: $after, itemTypes: [ISSUE_COMMENT, "
@@ -531,9 +551,22 @@ mod tests {
             pull.contains("MERGED_EVENT") && pull.contains("PULL_REQUEST_REVIEW"),
             "{pull}"
         );
-        let issue = selection(ISSUE_ITEM_TYPES);
+        for fragment in [
+            "... on MergedEvent",
+            "... on ReviewRequestedEvent",
+            "... on PullRequestReview",
+        ] {
+            assert!(pull.contains(fragment), "{fragment}");
+        }
+        let issue = selection(Owner::Issue);
         assert!(
             !issue.contains("MERGED_EVENT") && !issue.contains("REVIEW"),
+            "{issue}"
+        );
+        assert!(
+            !issue.contains("on MergedEvent")
+                && !issue.contains("on ReviewRequestedEvent")
+                && !issue.contains("on PullRequestReview"),
             "{issue}"
         );
         for fragment in [

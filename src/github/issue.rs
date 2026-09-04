@@ -65,7 +65,7 @@ struct Variables<'a> {
 fn query() -> String {
     format!(
         "{QUERY_HEAD} {} {QUERY_TAIL}",
-        timeline::selection(timeline::ISSUE_ITEM_TYPES)
+        timeline::selection(timeline::Owner::Issue)
     )
 }
 
