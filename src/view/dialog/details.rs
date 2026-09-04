@@ -27,12 +27,31 @@ const BOX_MARGIN: Margin = Margin::new(2, 0);
 /// Columns of the bar at the overlay's right.
 const BAR_WIDTH: u16 = 30;
 
+/// What Enter on a bar entry opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Link {
+    Issue {
+        /// GraphQL node id.
+        id: String,
+        number: u64,
+        title: String,
+    },
+    Pull {
+        owner: String,
+        repo: String,
+        number: u64,
+        title: String,
+    },
+}
+
 /// One box of the right bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidebarBox {
     pub title: &'static str,
     /// One entry per line; empty renders as `None`.
     pub lines: Vec<Line<'static>>,
+    /// `links[i]` opens from `lines[i]`; empty when no entry opens anything.
+    pub links: Vec<Link>,
 }
 
 /// What the overlay shows once loaded.
@@ -49,10 +68,12 @@ pub struct DetailsContent {
 }
 
 /// What the caller does after a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetailsEvent {
     Consumed,
     Close,
+    /// The caller closes this overlay and opens the link.
+    Open(Link),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +85,8 @@ enum Content {
         scroll: usize,
         /// Index of the focused box.
         focus: usize,
+        /// Entry the focused box's cursor rests on.
+        cursor: usize,
     },
 }
 
@@ -93,6 +116,7 @@ impl DetailsDialog {
                 content: Box::new(content),
                 scroll: 0,
                 focus: 0,
+                cursor: 0,
             },
             Err(e) => Content::Failed(e.to_string()),
         };
@@ -106,16 +130,25 @@ impl DetailsDialog {
             content,
             scroll,
             focus,
+            cursor,
         } = &mut self.content
         else {
             return DetailsEvent::Consumed;
         };
         let boxes = content.boxes.len().max(1);
+        let entries = content.boxes.get(*focus).map_or(0, |b| b.links.len());
         match code {
             KeyCode::Char('j') => *scroll += 1,
             KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
-            KeyCode::Tab => *focus = (*focus + 1) % boxes,
-            KeyCode::BackTab => *focus = (*focus + boxes - 1) % boxes,
+            KeyCode::Tab => (*focus, *cursor) = ((*focus + 1) % boxes, 0),
+            KeyCode::BackTab => (*focus, *cursor) = ((*focus + boxes - 1) % boxes, 0),
+            KeyCode::Down => *cursor = (*cursor + 1).min(entries.saturating_sub(1)),
+            KeyCode::Up => *cursor = cursor.saturating_sub(1),
+            KeyCode::Enter => {
+                if let Some(link) = content.boxes[*focus].links.get(*cursor) {
+                    return DetailsEvent::Open(link.clone());
+                }
+            }
             _ => {}
         }
         DetailsEvent::Consumed
@@ -139,12 +172,13 @@ impl DetailsDialog {
                 content,
                 scroll,
                 focus,
+                cursor,
             } => {
                 let [left, bar] =
                     Layout::horizontal([Constraint::Min(0), Constraint::Length(BAR_WIDTH)])
                         .areas(inner);
                 render_cards(content, number, scroll, left, buf);
-                render_bar(&content.boxes, *focus, bar, buf);
+                render_bar(&content.boxes, *focus, *cursor, bar, buf);
             }
         }
     }
@@ -183,11 +217,18 @@ fn wrapped(text: &str, width: usize) -> impl Iterator<Item = Line<'static>> + '_
         .map(Line::from)
 }
 
-/// The boxes stacked top to bottom, each as tall as its entries, cut at the bottom.
-fn render_bar(boxes: &[SidebarBox], focus: usize, area: Rect, buf: &mut Buffer) {
+/// The boxes stacked top to bottom, each as tall as its entries, cut at the bottom; the focused
+/// box's cursor entry, when it opens something, on the highlight background.
+fn render_bar(boxes: &[SidebarBox], focus: usize, cursor: usize, area: Rect, buf: &mut Buffer) {
     let mut y = area.y;
     for (i, item) in boxes.iter().enumerate() {
         let mut lines = item.lines.clone();
+        if i == focus
+            && cursor < item.links.len()
+            && let Some(line) = lines.get_mut(cursor)
+        {
+            *line = std::mem::take(line).patch_style(Style::new().bg(theme::TEMPLATE.hi_bg));
+        }
         if lines.is_empty() {
             lines.push(Line::styled(
                 "None",
@@ -411,7 +452,7 @@ fn render_cards(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::render_rows;
+    use crate::testkit::{render_buffer, render_rows};
 
     fn content(body: &str, timeline: Vec<TimelineItem>) -> DetailsContent {
         DetailsContent {
@@ -424,14 +465,17 @@ mod tests {
                 SidebarBox {
                     title: "Reviewers",
                     lines: vec![Line::raw("@rev pending")],
+                    links: vec![],
                 },
                 SidebarBox {
                     title: "Assignees",
                     lines: vec![],
+                    links: vec![],
                 },
                 SidebarBox {
                     title: "Labels",
                     lines: vec![Line::raw(" bug ")],
+                    links: vec![],
                 },
             ],
         }
@@ -612,6 +656,81 @@ mod tests {
         }
         let rows = render_rows(80, 20, |f| d.render(f.area(), f.buffer_mut()));
         assert!(rows.iter().any(|r| r.contains("Fix crash")), "{rows:?}");
+    }
+
+    #[test]
+    /// TU-R-071, TU-E-029 — the focused Development box keeps a highlighted cursor moved by Down/Up and reset by Tab; Enter opens the cursor's link, elsewhere it does nothing.
+    fn ut_development_cursor_and_open() {
+        let mut d = DetailsDialog::new(1, "t".into(), "Loading");
+        let issue = Link::Issue {
+            id: "I_7".into(),
+            number: 7,
+            title: "Crash".into(),
+        };
+        let pull = Link::Pull {
+            owner: "o".into(),
+            repo: "r".into(),
+            number: 9,
+            title: "Fix".into(),
+        };
+        let mut c = content("body", vec![]);
+        c.boxes.push(SidebarBox {
+            title: "Development",
+            lines: vec![Line::raw("#7 Crash"), Line::raw("#9 Fix")],
+            links: vec![issue.clone(), pull.clone()],
+        });
+        d.set_result(Ok::<_, String>(c));
+        assert_eq!(d.handle_key(KeyCode::Enter), DetailsEvent::Consumed);
+        for _ in 0..3 {
+            d.handle_key(KeyCode::Tab);
+        }
+        let buf = render_buffer(80, 24, |f| d.render(f.area(), f.buffer_mut()));
+        let bg_of = |text: &str| {
+            let area = buf.area;
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    let run: String = (x..area.width).map(|x| buf[(x, y)].symbol()).collect();
+                    if run.starts_with(text) {
+                        return buf[(x, y)].bg;
+                    }
+                }
+            }
+            panic!("{text} not drawn");
+        };
+        assert_eq!(bg_of("#7 Crash"), theme::TEMPLATE.hi_bg, "cursor entry");
+        assert_ne!(bg_of("#9 Fix"), theme::TEMPLATE.hi_bg, "other entry");
+        assert_eq!(d.handle_key(KeyCode::Down), DetailsEvent::Consumed);
+        assert_eq!(
+            d.handle_key(KeyCode::Down),
+            DetailsEvent::Consumed,
+            "clamped"
+        );
+        assert_eq!(d.handle_key(KeyCode::Enter), DetailsEvent::Open(pull));
+        d.handle_key(KeyCode::Up);
+        assert_eq!(
+            d.handle_key(KeyCode::Enter),
+            DetailsEvent::Open(issue.clone())
+        );
+        d.handle_key(KeyCode::Down);
+        d.handle_key(KeyCode::BackTab);
+        d.handle_key(KeyCode::Tab);
+        assert_eq!(
+            d.handle_key(KeyCode::Enter),
+            DetailsEvent::Open(issue),
+            "reset"
+        );
+        d.handle_key(KeyCode::Tab);
+        assert_eq!(
+            d.handle_key(KeyCode::Enter),
+            DetailsEvent::Consumed,
+            "Reviewers"
+        );
+        assert_eq!(d.handle_key(KeyCode::Tab), DetailsEvent::Consumed);
+        assert_eq!(
+            d.handle_key(KeyCode::Enter),
+            DetailsEvent::Consumed,
+            "empty box"
+        );
     }
 
     #[test]

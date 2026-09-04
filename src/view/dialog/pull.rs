@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use crate::github::pull::{PullDetails, ReviewState};
 use crate::github::pulls::PullState;
 use crate::view::board::{badge_text_color, label_color};
-use crate::view::dialog::details::{DetailsContent, SidebarBox};
+use crate::view::dialog::details::{DetailsContent, Link, SidebarBox};
 use crate::view::theme;
 
 pub const LOADING: &str = "Loading pull request..";
@@ -76,30 +76,49 @@ pub fn content(details: PullDetails) -> DetailsContent {
             SidebarBox {
                 title: "Reviewers",
                 lines: reviewers,
+                links: vec![],
             },
             SidebarBox {
                 title: "Assignees",
                 lines: logins(&details.assignees),
+                links: vec![],
             },
             SidebarBox {
                 title: "Labels",
                 lines: badges(&details.labels),
+                links: vec![],
             },
             SidebarBox {
                 title: "Projects",
                 lines: plain(&details.projects),
+                links: vec![],
             },
             SidebarBox {
                 title: "Milestone",
                 lines: plain(details.milestone.as_slice()),
+                links: vec![],
             },
             SidebarBox {
                 title: "Development",
-                lines: plain(&details.development),
+                lines: details
+                    .development
+                    .iter()
+                    .map(|i| Line::raw(format!("#{} {}", i.number, i.title)))
+                    .collect(),
+                links: details
+                    .development
+                    .into_iter()
+                    .map(|i| Link::Issue {
+                        id: i.id,
+                        number: i.number,
+                        title: i.title,
+                    })
+                    .collect(),
             },
             SidebarBox {
                 title: "Participants",
                 lines: logins(&details.participants),
+                links: vec![],
             },
         ],
     }
@@ -109,6 +128,7 @@ pub fn content(details: PullDetails) -> DetailsContent {
 mod tests {
     use super::*;
     use crate::github::board::Label;
+    use crate::github::pull::IssueRef;
     use crate::github::pull::Reviewer;
 
     #[test]
@@ -138,7 +158,11 @@ mod tests {
             }],
             projects: vec!["Roadmap".into()],
             milestone: Some("v1".into()),
-            development: vec!["#7 Crash on start".into()],
+            development: vec![IssueRef {
+                id: "I_7".into(),
+                number: 7,
+                title: "Crash on start".into(),
+            }],
             participants: vec!["octo".into(), "a".into()],
             ..PullDetails::default()
         };
@@ -165,6 +189,21 @@ mod tests {
         assert_eq!(
             text(&c.boxes[0]),
             vec!["@rev pending", "@a changes requested"]
+        );
+        assert_eq!(text(&c.boxes[5]), vec!["#7 Crash on start"]);
+        assert_eq!(
+            c.boxes[5].links,
+            vec![Link::Issue {
+                id: "I_7".into(),
+                number: 7,
+                title: "Crash on start".into()
+            }]
+        );
+        assert!(
+            c.boxes
+                .iter()
+                .enumerate()
+                .all(|(i, b)| i == 5 || b.links.is_empty())
         );
         assert_eq!(text(&c.boxes[1]), vec!["@b"]);
         assert_eq!(text(&c.boxes[2]), vec![" bug "]);

@@ -17,7 +17,7 @@ use crate::view::board::{self, BoardView};
 use crate::view::command_line::{CommandLine, CommandLineEvent};
 use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteForm};
 use crate::view::dialog::config::{Choice, Field};
-use crate::view::dialog::details::{DetailsDialog, DetailsEvent};
+use crate::view::dialog::details::{DetailsDialog, DetailsEvent, Link};
 use crate::view::dialog::{issue, pull};
 use crate::view::notice;
 use crate::view::remote::RemoteView;
@@ -236,6 +236,41 @@ impl App {
         self.pending_fetches.push(request);
     }
 
+    /// Switches to the tab of the linked item and opens its details overlay, with the GitHub
+    /// token of either configured side.
+    fn open_link(&mut self, link: Link) {
+        let Some(token) = self
+            .github_remote()
+            .map(|(_, _, t)| t)
+            .or_else(|| self.github_board().map(|(_, _, t)| t))
+        else {
+            return;
+        };
+        let token = token.to_string();
+        match link {
+            Link::Issue { id, number, title } => {
+                self.active_tab = Tab::Board;
+                self.issue = Some(DetailsDialog::new(number, title, issue::LOADING));
+                self.pending_fetches.push(FetchRequest::Issue { token, id });
+            }
+            Link::Pull {
+                owner,
+                repo,
+                number,
+                title,
+            } => {
+                self.active_tab = Tab::Remote;
+                self.pull = Some(DetailsDialog::new(number, title, pull::LOADING));
+                self.pending_fetches.push(FetchRequest::PullRequest {
+                    token,
+                    owner,
+                    repo,
+                    number,
+                });
+            }
+        }
+    }
+
     /// Fetches queued since the last call, for the loop to run.
     pub fn take_fetch_requests(&mut self) -> Vec<FetchRequest> {
         std::mem::take(&mut self.pending_fetches)
@@ -342,14 +377,24 @@ impl App {
             return;
         }
         if let Some(issue) = self.issue.as_mut() {
-            if issue.handle_key(code) == DetailsEvent::Close {
-                self.issue = None;
+            match issue.handle_key(code) {
+                DetailsEvent::Consumed => {}
+                DetailsEvent::Close => self.issue = None,
+                DetailsEvent::Open(link) => {
+                    self.issue = None;
+                    self.open_link(link);
+                }
             }
             return;
         }
         if let Some(pull) = self.pull.as_mut() {
-            if pull.handle_key(code) == DetailsEvent::Close {
-                self.pull = None;
+            match pull.handle_key(code) {
+                DetailsEvent::Consumed => {}
+                DetailsEvent::Close => self.pull = None,
+                DetailsEvent::Open(link) => {
+                    self.pull = None;
+                    self.open_link(link);
+                }
             }
             return;
         }
@@ -1404,6 +1449,74 @@ mod tests {
             rows.iter().any(|r| r.contains("owner: o")),
             "summary stays: {rows:?}"
         );
+    }
+
+    #[test]
+    /// TU-R-071, TU-E-030 — Enter on a Development entry closes the overlay, switches the tab and opens the linked item's overlay, whatever the target list's state.
+    fn ut_development_enter_switches_tabs() {
+        let t = TempDir::new("dev");
+        let mut a = app(&t, Some(remote_settings()));
+        a.take_fetch_requests();
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        key(&mut a, KeyCode::Char('1'));
+        a.handle_message(Message::PullRequests(Ok(vec![
+            crate::github::pulls::PullRequest {
+                number: 5,
+                ..Default::default()
+            },
+        ])));
+        key(&mut a, KeyCode::Enter);
+        a.take_fetch_requests();
+        a.handle_message(Message::PullRequest(Ok(crate::github::pull::PullDetails {
+            number: 5,
+            development: vec![crate::github::pull::IssueRef {
+                id: "I_7".into(),
+                number: 7,
+                title: "Crash".into(),
+            }],
+            ..Default::default()
+        })));
+        for _ in 0..5 {
+            key(&mut a, KeyCode::Tab);
+        }
+        key(&mut a, KeyCode::Enter);
+        assert_eq!(a.active_tab, Tab::Board);
+        assert!(a.pull.is_none() && a.issue.is_some());
+        assert_eq!(
+            a.take_fetch_requests(),
+            vec![FetchRequest::Issue {
+                token: "t".into(),
+                id: "I_7".into()
+            }]
+        );
+        let rows = render_rows(80, 24, |f| a.render(f));
+        assert!(rows.iter().any(|r| r.contains("#7 Crash")), "{rows:?}");
+        a.handle_message(Message::Issue(Ok(crate::github::issue::Issue {
+            number: 7,
+            development: vec![crate::github::issue::PullRef {
+                number: 9,
+                title: "Fix".into(),
+                repository: "x/y".into(),
+            }],
+            ..Default::default()
+        })));
+        for _ in 0..5 {
+            key(&mut a, KeyCode::Tab);
+        }
+        key(&mut a, KeyCode::Enter);
+        assert_eq!(a.active_tab, Tab::Remote);
+        assert!(a.issue.is_none() && a.pull.is_some());
+        assert_eq!(
+            a.take_fetch_requests(),
+            vec![FetchRequest::PullRequest {
+                token: "t".into(),
+                owner: "x".into(),
+                repo: "y".into(),
+                number: 9
+            }]
+        );
+        let rows = render_rows(80, 24, |f| a.render(f));
+        assert!(rows.iter().any(|r| r.contains("#9 Fix")), "{rows:?}");
     }
 
     #[test]

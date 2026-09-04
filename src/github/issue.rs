@@ -8,18 +8,19 @@ use super::timeline::{self, TimelineItem};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
-const QUERY_HEAD: &str = "query($id: ID!, $after: String) { node(id: $id) { __typename ... on Issue { title number state body url author { login } repository { nameWithOwner } labels(first: 10) { nodes { name color } } assignees(first: 5) { nodes { login } } projectItems(first: 10) { nodes { project { title } } } milestone { title } parent { number title } subIssues(first: 20) { nodes { number title } } closedByPullRequestsReferences(first: 10) { nodes { number title } } participants(first: 20) { nodes { login } }";
+const QUERY_HEAD: &str = "query($id: ID!, $after: String) { node(id: $id) { __typename ... on Issue { title number state body url author { login } repository { nameWithOwner } labels(first: 10) { nodes { name color } } assignees(first: 5) { nodes { login } } projectItems(first: 10) { nodes { project { title } } } milestone { title } parent { number title } subIssues(first: 20) { nodes { number title } } closedByPullRequestsReferences(first: 10) { nodes { number title repository { nameWithOwner } } } participants(first: 20) { nodes { login } }";
 
 const QUERY_TAIL: &str = " } } }";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum IssueState {
+    #[default]
     Open,
     Closed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Issue {
     pub number: u64,
     pub title: String,
@@ -35,10 +36,18 @@ pub struct Issue {
     pub milestone: Option<String>,
     /// `parent #<number> <title>` then `sub #<number> <title>` lines.
     pub relationships: Vec<String>,
-    /// Closing pull requests as `#<number> <title>`.
-    pub development: Vec<String>,
+    pub development: Vec<PullRef>,
     pub participants: Vec<String>,
     pub timeline: Vec<TimelineItem>,
+}
+
+/// A pull request that closes an issue; `repository` is its `nameWithOwner`, which may differ
+/// from the issue's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRef {
+    pub number: u64,
+    pub title: String,
+    pub repository: String,
 }
 
 /// One page of a details response: the issue with this page's timeline items.
@@ -118,7 +127,7 @@ struct IssueNode {
     milestone: Option<Titled>,
     parent: Option<Ref>,
     sub_issues: Nodes<Ref>,
-    closed_by_pull_requests_references: Nodes<Ref>,
+    closed_by_pull_requests_references: Nodes<PullRefNode>,
     participants: Nodes<Assignee>,
     timeline_items: timeline::Connection,
 }
@@ -137,6 +146,13 @@ struct Titled {
 struct Ref {
     number: u64,
     title: String,
+}
+
+#[derive(Deserialize)]
+struct PullRefNode {
+    number: u64,
+    title: String,
+    repository: Repository,
 }
 
 #[derive(Deserialize)]
@@ -207,7 +223,11 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
                 .closed_by_pull_requests_references
                 .nodes
                 .into_iter()
-                .map(|r| reference("", r))
+                .map(|r| PullRef {
+                    number: r.number,
+                    title: r.title,
+                    repository: r.repository.name_with_owner,
+                })
                 .collect(),
             participants: node
                 .participants
@@ -266,7 +286,7 @@ mod tests {
     const BODY: &str = r#"{"data":{"node":{"__typename":"Issue","title":"Crash on start","number":7,"state":"OPEN","body":"Steps:\n1. run\n2. boom","url":"https://github.com/o/r/issues/7","author":{"login":"octo"},"repository":{"nameWithOwner":"o/r"},"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},"assignees":{"nodes":[{"login":"a"}]},
         "projectItems":{"nodes":[{"project":{"title":"Roadmap"}}]},"milestone":{"title":"v1"},
         "parent":{"number":3,"title":"Epic"},"subIssues":{"nodes":[{"number":8,"title":"Child"}]},
-        "closedByPullRequestsReferences":{"nodes":[{"number":5,"title":"Fix crash"}]},"participants":{"nodes":[{"login":"octo"},{"login":"a"}]},
+        "closedByPullRequestsReferences":{"nodes":[{"number":5,"title":"Fix crash","repository":{"nameWithOwner":"o/r"}}]},"participants":{"nodes":[{"login":"octo"},{"login":"a"}]},
         "timelineItems":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[{"__typename":"IssueComment","body":"LGTM","createdAt":"2026-09-04T10:00:00Z","author":{"login":"a"}},{"__typename":"ClosedEvent","actor":{"login":"octo"},"createdAt":"2026-09-05T10:00:00Z","stateReason":"COMPLETED"}]}}}}"#;
 
     #[test]
@@ -294,7 +314,7 @@ mod tests {
             "milestone { title }",
             "parent { number title }",
             "subIssues(first: 20) { nodes { number title } }",
-            "closedByPullRequestsReferences(first: 10) { nodes { number title } }",
+            "closedByPullRequestsReferences(first: 10) { nodes { number title repository { nameWithOwner } } }",
             "participants(first: 20) { nodes { login } }",
             "timelineItems(first: 100, after: $after, itemTypes: [ISSUE_COMMENT, ",
             "... on ClosedEvent { actor { login } createdAt stateReason }",
@@ -338,7 +358,14 @@ mod tests {
             issue.relationships,
             vec!["parent #3 Epic".to_string(), "sub #8 Child".to_string()]
         );
-        assert_eq!(issue.development, vec!["#5 Fix crash".to_string()]);
+        assert_eq!(
+            issue.development,
+            vec![PullRef {
+                number: 5,
+                title: "Fix crash".into(),
+                repository: "o/r".into()
+            }]
+        );
         assert_eq!(
             issue.participants,
             vec!["octo".to_string(), "a".to_string()]

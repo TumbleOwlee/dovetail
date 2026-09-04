@@ -9,7 +9,7 @@ use super::timeline::{self, TimelineItem};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
-const QUERY_HEAD: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number title body state isDraft url author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } } latestReviews(first: 20) { nodes { state author { login } } } assignees(first: 10) { nodes { login } } labels(first: 20) { nodes { name color } } projectItems(first: 10) { nodes { project { title } } } milestone { title } closingIssuesReferences(first: 10) { nodes { number title } } participants(first: 20) { nodes { login } }";
+const QUERY_HEAD: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number title body state isDraft url author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } } latestReviews(first: 20) { nodes { state author { login } } } assignees(first: 10) { nodes { login } } labels(first: 20) { nodes { name color } } projectItems(first: 10) { nodes { project { title } } } milestone { title } closingIssuesReferences(first: 10) { nodes { id number title } } participants(first: 20) { nodes { login } }";
 
 const QUERY_TAIL: &str = " } } }";
 
@@ -45,8 +45,7 @@ pub struct PullDetails {
     pub labels: Vec<Label>,
     pub projects: Vec<String>,
     pub milestone: Option<String>,
-    /// Closing issue references as `#<number> <title>`.
-    pub development: Vec<String>,
+    pub development: Vec<IssueRef>,
     pub participants: Vec<String>,
     pub timeline: Vec<TimelineItem>,
 }
@@ -189,10 +188,12 @@ struct Milestone {
     title: String,
 }
 
-#[derive(Deserialize)]
-struct IssueRef {
-    number: u64,
-    title: String,
+/// An issue a pull request closes; `id` is the GraphQL node id the issue is loaded by.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct IssueRef {
+    pub id: String,
+    pub number: u64,
+    pub title: String,
 }
 
 #[derive(Deserialize)]
@@ -264,12 +265,7 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
                 .map(|p| p.project.title)
                 .collect(),
             milestone: node.milestone.map(|m| m.title),
-            development: node
-                .closing_issues_references
-                .nodes
-                .into_iter()
-                .map(|i| format!("#{} {}", i.number, i.title))
-                .collect(),
+            development: node.closing_issues_references.nodes,
             participants: node
                 .participants
                 .nodes
@@ -325,7 +321,7 @@ mod tests {
         "latestReviews":{"nodes":[{"state":"APPROVED","author":{"login":"a"}},{"state":"CHANGES_REQUESTED","author":null}]},
         "assignees":{"nodes":[{"login":"b"}]},"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},
         "projectItems":{"nodes":[{"project":{"title":"Roadmap"}}]},"milestone":{"title":"v1"},
-        "closingIssuesReferences":{"nodes":[{"number":7,"title":"Crash on start"}]},"participants":{"nodes":[{"login":"octo"},{"login":"a"}]},
+        "closingIssuesReferences":{"nodes":[{"id":"I_7","number":7,"title":"Crash on start"}]},"participants":{"nodes":[{"login":"octo"},{"login":"a"}]},
         "timelineItems":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[
         {"__typename":"IssueComment","body":"LGTM","createdAt":"2026-09-04T10:00:00Z","author":{"login":"a"}},
         {"__typename":"MergedEvent","actor":null,"createdAt":"2026-09-05T10:00:00Z"}
@@ -350,7 +346,7 @@ mod tests {
             "labels(first: 20) { nodes { name color } }",
             "projectItems(first: 10) { nodes { project { title } } }",
             "milestone { title }",
-            "closingIssuesReferences(first: 10) { nodes { number title } }",
+            "closingIssuesReferences(first: 10) { nodes { id number title } }",
             "participants(first: 20) { nodes { login } }",
             "timelineItems(first: 100, after: $after, itemTypes: [ISSUE_COMMENT, ",
             "MERGED_EVENT, REVIEW_REQUESTED_EVENT, PULL_REQUEST_REVIEW,",
@@ -410,7 +406,14 @@ mod tests {
         assert_eq!(d.labels[0].name, "bug");
         assert_eq!(d.projects, vec!["Roadmap".to_string()]);
         assert_eq!(d.milestone.as_deref(), Some("v1"));
-        assert_eq!(d.development, vec!["#7 Crash on start".to_string()]);
+        assert_eq!(
+            d.development,
+            vec![IssueRef {
+                id: "I_7".into(),
+                number: 7,
+                title: "Crash on start".into()
+            }]
+        );
         assert_eq!(d.participants, vec!["octo".to_string(), "a".to_string()]);
         let bare = BODY.replace(r#""milestone":{"title":"v1"}"#, r#""milestone":null"#);
         assert_eq!(parse_page(&bare).expect("parses").details.milestone, None);

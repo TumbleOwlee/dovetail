@@ -58,3 +58,5 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-026** | The right bar's boxes need more rows than the overlay has | Later boxes are cut off at the bottom; the left content still scrolls; cites TU-R-068 |
 | **TU-E-027** | An issue or pull request has no timeline items | One box titled `Timeline` reading `No activity` follows the description card; cites TU-R-066 |
 | **TU-E-028** | A timeline item's actor account was deleted | The title shows `@ghost`; cites TU-R-066 |
+| **TU-E-029** | Enter in a details overlay with the focus outside `Development`, or on an empty `Development` box | Nothing happens; the overlay stays open; cites TU-R-071 |
+| **TU-E-030** | Enter on a `Development` entry while the target tab's list is unavailable, loading or failed | The tab switches and the overlay opens anyway; the list underneath keeps its state; cites TU-R-071 |

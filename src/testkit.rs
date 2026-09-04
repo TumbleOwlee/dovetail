@@ -38,6 +38,17 @@ impl Drop for TempDir {
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
+/// Renders one frame at `width`x`height` and returns the drawn buffer.
+pub fn render_buffer<F: FnOnce(&mut ratatui::Frame)>(
+    width: u16,
+    height: u16,
+    render: F,
+) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
+    terminal.draw(render).expect("draw");
+    terminal.backend().buffer().clone()
+}
+
 /// Renders one frame at `width`x`height` and returns the rows as trimmed-right strings.
 pub fn render_rows<F: FnOnce(&mut ratatui::Frame)>(
     width: u16,

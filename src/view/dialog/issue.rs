@@ -1,10 +1,25 @@
 //! Issue details as overlay content.
 
-use crate::github::issue::{Issue, IssueState};
-use crate::view::dialog::details::{DetailsContent, SidebarBox};
+use crate::github::issue::{Issue, IssueState, PullRef};
+use crate::view::dialog::details::{DetailsContent, Link, SidebarBox};
 use crate::view::dialog::pull::{badges, logins, plain};
+use ratatui::text::Line;
 
 pub const LOADING: &str = "Loading issue..";
+
+/// The link of a closing pull request, addressed by the owner and name of its repository.
+fn pull_link(p: PullRef) -> Link {
+    let (owner, repo) = p
+        .repository
+        .split_once('/')
+        .unwrap_or((p.repository.as_str(), ""));
+    Link::Pull {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        number: p.number,
+        title: p.title,
+    }
+}
 
 /// The overlay content of an issue: seven boxes, assignees first.
 pub fn content(issue: Issue) -> DetailsContent {
@@ -22,30 +37,41 @@ pub fn content(issue: Issue) -> DetailsContent {
             SidebarBox {
                 title: "Assignees",
                 lines: logins(&issue.assignees),
+                links: vec![],
             },
             SidebarBox {
                 title: "Labels",
                 lines: badges(&issue.labels),
+                links: vec![],
             },
             SidebarBox {
                 title: "Projects",
                 lines: plain(&issue.projects),
+                links: vec![],
             },
             SidebarBox {
                 title: "Milestones",
                 lines: plain(issue.milestone.as_slice()),
+                links: vec![],
             },
             SidebarBox {
                 title: "Relationships",
                 lines: plain(&issue.relationships),
+                links: vec![],
             },
             SidebarBox {
                 title: "Development",
-                lines: plain(&issue.development),
+                lines: issue
+                    .development
+                    .iter()
+                    .map(|p| Line::raw(format!("#{} {}", p.number, p.title)))
+                    .collect(),
+                links: issue.development.into_iter().map(pull_link).collect(),
             },
             SidebarBox {
                 title: "Participants",
                 lines: logins(&issue.participants),
+                links: vec![],
             },
         ],
     }
@@ -76,7 +102,11 @@ mod tests {
             projects: vec!["Roadmap".into()],
             milestone: Some("v1".into()),
             relationships: vec!["parent #3 Epic".into(), "sub #8 Child".into()],
-            development: vec!["#5 Fix crash".into()],
+            development: vec![PullRef {
+                number: 5,
+                title: "Fix crash".into(),
+                repository: "o/r".into(),
+            }],
             participants: vec!["octo".into()],
             timeline: vec![TimelineItem {
                 actor: Some("a".into()),
@@ -113,5 +143,21 @@ mod tests {
         assert_eq!(text(&c.boxes[4]), vec!["parent #3 Epic", "sub #8 Child"]);
         assert_eq!(text(&c.boxes[5]), vec!["#5 Fix crash"]);
         assert_eq!(text(&c.boxes[6]), vec!["@octo"]);
+        assert_eq!(text(&c.boxes[5]), vec!["#5 Fix crash"]);
+        assert_eq!(
+            c.boxes[5].links,
+            vec![Link::Pull {
+                owner: "o".into(),
+                repo: "r".into(),
+                number: 5,
+                title: "Fix crash".into()
+            }]
+        );
+        assert!(
+            c.boxes
+                .iter()
+                .enumerate()
+                .all(|(i, b)| i == 5 || b.links.is_empty())
+        );
     }
 }
