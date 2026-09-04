@@ -141,8 +141,10 @@ impl Field {
         }
     }
 
-    fn for_remote(kind: RemoteKind) -> &'static [Field] {
+    /// `shared`: the board is GitHub too, so the remote reuses its values and asks nothing.
+    fn for_remote(kind: RemoteKind, shared: bool) -> &'static [Field] {
         match kind {
+            RemoteKind::Github if shared => &[],
             RemoteKind::Github => &[Field::RemoteOwner, Field::RemoteRepo, Field::RemoteToken],
             RemoteKind::Bitbucket => &[
                 Field::BbWorkspace,
@@ -532,6 +534,10 @@ impl ConfigDialog {
         state.set_cursor(value.chars().count());
     }
 
+    fn shares_github(&self) -> bool {
+        self.board_kind() == BoardKind::Github && self.remote_kind() == RemoteKind::Github
+    }
+
     /// Focus order: board kind, the board kind's fields, remote kind, the remote kind's fields.
     pub fn visible_slots(&self) -> Vec<Slot> {
         let mut slots = vec![Slot::BoardKind];
@@ -542,7 +548,7 @@ impl ConfigDialog {
         );
         slots.push(Slot::RemoteKind);
         slots.extend(
-            Field::for_remote(self.remote_kind())
+            Field::for_remote(self.remote_kind(), self.shares_github())
                 .iter()
                 .map(|f| Slot::Input(*f)),
         );
@@ -655,7 +661,7 @@ impl ConfigDialog {
         .areas(columns);
 
         let board_fields = Field::for_board(self.board_kind());
-        let remote_fields = Field::for_remote(self.remote_kind());
+        let remote_fields = Field::for_remote(self.remote_kind(), self.shares_github());
         let rows = |n: usize| {
             let mut c = vec![Constraint::Length(3)];
             c.extend(std::iter::repeat_n(Constraint::Length(3), n));
@@ -746,10 +752,19 @@ impl ConfigDialog {
             },
         };
         let remote = match self.remote_kind() {
-            RemoteKind::Github => RemoteForm::Github {
-                owner: need(Field::RemoteOwner)?,
-                repo: need(Field::RemoteRepo)?,
-                token: need(Field::RemoteToken)?,
+            RemoteKind::Github => match &board {
+                BoardForm::Github {
+                    owner, repo, token, ..
+                } => RemoteForm::Github {
+                    owner: owner.clone(),
+                    repo: repo.clone(),
+                    token: token.clone(),
+                },
+                BoardForm::Jira { .. } => RemoteForm::Github {
+                    owner: need(Field::RemoteOwner)?,
+                    repo: need(Field::RemoteRepo)?,
+                    token: need(Field::RemoteToken)?,
+                },
             },
             RemoteKind::Bitbucket => RemoteForm::Bitbucket {
                 workspace: need(Field::BbWorkspace)?,
@@ -843,13 +858,7 @@ mod tests {
         type_str(d, "3");
         tab(d);
         type_str(d, "tok");
-        tab(d); // remote kind
-        tab(d);
-        type_str(d, "o2");
-        tab(d);
-        type_str(d, "r2");
-        tab(d);
-        type_str(d, "tok2");
+        tab(d); // remote kind: GitHub too, so it has no fields of its own
     }
 
     #[test]
@@ -876,12 +885,18 @@ mod tests {
                 Slot::Input(Field::BoardProject),
                 Slot::Input(Field::BoardToken),
                 Slot::RemoteKind,
+            ]
+        );
+        key(&mut d, KeyCode::Down); // board -> Jira
+        assert_eq!(
+            &d.visible_slots()[5..],
+            &[
+                Slot::RemoteKind,
                 Slot::Input(Field::RemoteOwner),
                 Slot::Input(Field::RemoteRepo),
                 Slot::Input(Field::RemoteToken),
             ]
         );
-        key(&mut d, KeyCode::Down); // board -> Jira
         assert_eq!(d.board_kind(), BoardKind::Jira);
         let slots = d.visible_slots();
         assert_eq!(
@@ -975,7 +990,7 @@ mod tests {
     fn ut_enter_confirms_when_complete() {
         let mut d = ConfigDialog::new(None);
         fill_github(&mut d);
-        assert!(matches!(d.focus(), Slot::Input(Field::RemoteToken)));
+        assert_eq!(d.focus(), Slot::RemoteKind);
         let ev = key(&mut d, KeyCode::Enter);
         assert_eq!(
             ev,
@@ -987,9 +1002,9 @@ mod tests {
                     token: "tok".into()
                 },
                 RemoteForm::Github {
-                    owner: "o2".into(),
-                    repo: "r2".into(),
-                    token: "tok2".into()
+                    owner: "o".into(),
+                    repo: "r".into(),
+                    token: "tok".into()
                 }
             )
         );
@@ -1018,7 +1033,7 @@ mod tests {
     fn ut_enter_rejects_zero_project() {
         let mut d = ConfigDialog::new(None);
         fill_github(&mut d);
-        for _ in 0..5 {
+        for _ in 0..2 {
             key(&mut d, KeyCode::BackTab);
         }
         assert_eq!(d.focus(), Slot::Input(Field::BoardProject));
@@ -1344,7 +1359,7 @@ mod tests {
             choices(&[("3", "3 Roadmap"), ("7", "7 Bugs")]),
         );
         assert_eq!(d.value(Field::BoardProject), "3");
-        for _ in 0..5 {
+        for _ in 0..2 {
             key(&mut d, KeyCode::BackTab);
         }
         assert_eq!(d.focus(), Slot::Input(Field::BoardProject));
@@ -1370,5 +1385,23 @@ mod tests {
         key(&mut d, KeyCode::Down); // GitHub
         assert!(d.has_selection(Field::BoardProject));
         assert_eq!(d.value(Field::BoardProject), "3");
+    }
+
+    #[test]
+    /// TU-R-045, TU-E-012 — GitHub on both sides asks once; another remote kind brings its own fields back.
+    fn ut_shared_github_fields_asked_once() {
+        let mut d = ConfigDialog::new(None);
+        fill_github(&mut d);
+        assert!(!d.visible_slots().contains(&Slot::Input(Field::RemoteOwner)));
+        let rows = crate::testkit::render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert_eq!(rows.join("\n").matches("Owner").count(), 1);
+        key(&mut d, KeyCode::Down); // remote -> Bitbucket
+        assert!(d.visible_slots().contains(&Slot::Input(Field::BbWorkspace)));
+        key(&mut d, KeyCode::Down); // back to GitHub
+        assert!(!d.visible_slots().contains(&Slot::Input(Field::RemoteOwner)));
+        // Board Jira with remote GitHub: the remote asks for its own values.
+        let mut d = ConfigDialog::new(None);
+        key(&mut d, KeyCode::Down);
+        assert!(d.visible_slots().contains(&Slot::Input(Field::RemoteOwner)));
     }
 }

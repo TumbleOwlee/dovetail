@@ -257,12 +257,17 @@ impl App {
             &profile_base("board", &self.repo_root),
             board.profile(),
         );
-        let remote_name = store_profile(
-            &mut candidate,
-            remote_ref.as_deref(),
-            &profile_base("remote", &self.repo_root),
-            remote.profile(),
-        );
+        // Identical credential values on both sides are one profile, referenced twice.
+        let remote_name = if remote.profile() == board.profile() {
+            board_name.clone()
+        } else {
+            store_profile(
+                &mut candidate,
+                remote_ref.as_deref(),
+                &profile_base("remote", &self.repo_root),
+                remote.profile(),
+            )
+        };
         let mut board = board.section();
         board.set_credentials(Some(board_name));
         let mut remote = remote.section();
@@ -503,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-014, CF-R-029, CF-R-031 — confirming writes the user file, applies settings, closes.
+    /// TU-R-014, TU-R-045, CF-R-029, CF-R-031, CF-R-036 — confirming writes the user file, applies settings, closes.
     fn ut_confirm_writes_applies_and_closes() {
         let t = TempDir::new("confirm");
         let mut a = app(&t, None);
@@ -515,19 +520,15 @@ mod tests {
         type_str(&mut a, "7");
         key(&mut a, KeyCode::Tab);
         type_str(&mut a, "tok");
-        key(&mut a, KeyCode::Tab);
-        key(&mut a, KeyCode::Tab);
-        type_str(&mut a, "own");
-        key(&mut a, KeyCode::Tab);
-        type_str(&mut a, "rep");
-        key(&mut a, KeyCode::Tab);
-        type_str(&mut a, "tok2");
         key(&mut a, KeyCode::Enter);
         assert!(a.dialog.is_none());
         let s = a.settings.as_ref().expect("settings applied");
         assert_eq!(s.source, Source::UserFile);
         assert_eq!(s.board.credentials(), Some("board-repo"));
-        assert_eq!(s.remote.credentials(), Some("remote-repo"));
+        // CF-R-036: shared GitHub values reference the one stored profile.
+        assert_eq!(s.remote.credentials(), Some("board-repo"));
+        assert_eq!(s.remote.identifiers(), s.board.identifiers()[..2].to_vec());
+        assert!(!a.user_config.credentials.contains_key("remote-repo"));
         assert!(a.credentials_present(&s.board));
         let on_disk = store::load_user_config(&a.user_path).expect("loads");
         assert_eq!(on_disk, a.user_config);

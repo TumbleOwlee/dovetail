@@ -53,4 +53,5 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **CF-R-032** — When the derived profile name is already taken, the suffix `-2`, `-3`, … shall be appended, taking the first free name.
 **CF-R-033** — Writing the repository-level file shall emit the `board` and `remote` sections with every key except `credentials`.
 **CF-R-034** — Writing shall create the target file's missing parent directories.
+**CF-R-036** — When the dialog confirms with both sections sharing the same credential values, one profile shall be stored and both sections shall reference it.
 **CF-R-035** — A write failure shall be reported as an error and shall not terminate the application.
