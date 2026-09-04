@@ -1212,8 +1212,10 @@ mod tests {
             .position(|r| r.contains("github: HTTP 403"))
             .expect("error box");
         assert_eq!(row, 3, "vertically centered: {rows:?}");
+        let left = rows[row].find('│').expect("border") as i64;
+        let width = rows[row].trim_end().chars().count() as i64 - left;
         assert!(
-            rows[row].starts_with("                  │"),
+            (left - (60 - width) / 2).abs() <= 1,
             "horizontally centered: {}",
             rows[row]
         );
