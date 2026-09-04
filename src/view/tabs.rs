@@ -1,6 +1,5 @@
 //! The tab line and the read-only summary each tab shows.
 
-use ferrowl_ui::COLOR_SCHEME;
 use ferrowl_ui::state::ScrollingTabsState;
 use ferrowl_ui::widgets::ScrollingTabsBuilder;
 use ratatui::buffer::Buffer;
@@ -123,7 +122,7 @@ pub fn render_body(area: Rect, buf: &mut Buffer, lines: &[String]) {
             .collect::<Vec<_>>(),
     );
     Paragraph::new(text)
-        .style(Style::default().fg(COLOR_SCHEME.text).bg(theme::BG))
+        .style(Style::default().fg(theme::TEMPLATE.text).bg(theme::BG))
         .render(area, buf);
 }
 

@@ -1,15 +1,18 @@
-//! Details overlay shared by issues and pull requests: a description card and a comments card at
-//! the left, scrolled together, and a bar of focusable boxes at the right.
+//! Details overlay shared by issues and pull requests: a description card and one box per
+//! timeline item at the left, scrolled together, and a bar of focusable boxes at the right.
 
 use crossterm::event::KeyCode;
-use ferrowl_ui::COLOR_SCHEME;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, HorizontalAlignment, Layout, Margin, Rect};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 
-use crate::github::pull::Comment;
+use crate::github::board::Label;
+use crate::github::pull::ReviewState;
+use crate::github::timeline::{Event, TimelineItem};
 use crate::view::board::wrap_title;
+use crate::view::board::{badge_text_color, label_color};
 use crate::view::{notice, theme};
 
 /// Screen cells left free around the overlay on each side.
@@ -18,7 +21,7 @@ const INSET: Margin = Margin::new(4, 3);
 /// Space between a card's borders and its text: two columns, one row.
 const CARD_MARGIN: Margin = Margin::new(2, 1);
 
-/// Space between a bar box's borders and its entries: two columns, no rows.
+/// Space between a bar box's or an event box's borders and its lines: two columns, no rows.
 const BOX_MARGIN: Margin = Margin::new(2, 0);
 
 /// Columns of the bar at the overlay's right.
@@ -41,7 +44,7 @@ pub struct DetailsContent {
     /// `None` when the author account was deleted.
     pub author: Option<String>,
     pub body: String,
-    pub comments: Vec<Comment>,
+    pub timeline: Vec<TimelineItem>,
     pub boxes: Vec<SidebarBox>,
 }
 
@@ -123,7 +126,7 @@ impl DetailsDialog {
         Clear.render(boxed, buf);
         buf.set_style(boxed, theme::base());
         let block = Block::bordered()
-            .style(theme::on_bg(COLOR_SCHEME.hi))
+            .style(theme::on_bg(theme::TEMPLATE.hi))
             .title(format!(" #{} {} ", self.number, self.title))
             .title_alignment(HorizontalAlignment::Center);
         let inner = block.inner(boxed).inner(Margin::new(1, 0));
@@ -152,7 +155,8 @@ struct CardText {
     title: String,
     margin: Margin,
     lines: Vec<Line<'static>>,
-    focused: bool,
+    /// Border color.
+    color: Color,
 }
 
 impl CardText {
@@ -162,13 +166,8 @@ impl CardText {
     }
 
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let color = if self.focused {
-            COLOR_SCHEME.hi
-        } else {
-            COLOR_SCHEME.border
-        };
         let block = Block::bordered()
-            .style(theme::on_bg(color))
+            .style(theme::on_bg(self.color))
             .title(self.title);
         let inner = block.inner(area).inner(self.margin);
         block.render(area, buf);
@@ -190,13 +189,20 @@ fn render_bar(boxes: &[SidebarBox], focus: usize, area: Rect, buf: &mut Buffer) 
     for (i, item) in boxes.iter().enumerate() {
         let mut lines = item.lines.clone();
         if lines.is_empty() {
-            lines.push(Line::styled("None", theme::on_bg(COLOR_SCHEME.placeholder)));
+            lines.push(Line::styled(
+                "None",
+                theme::on_bg(theme::TEMPLATE.placeholder),
+            ));
         }
         let card = CardText {
             title: format!(" {} ", item.title),
             margin: BOX_MARGIN,
             lines,
-            focused: i == focus,
+            color: if i == focus {
+                theme::TEMPLATE.hi
+            } else {
+                theme::TEMPLATE.border
+            },
         };
         let height = card.height().min(area.bottom().saturating_sub(y));
         if height < 2 {
@@ -207,7 +213,142 @@ fn render_bar(boxes: &[SidebarBox], focus: usize, area: Rect, buf: &mut Buffer) 
     }
 }
 
-/// Both cards stacked in a buffer as tall as they need, scrolled into `area`.
+/// Name shown in a timeline box's title.
+fn event_name(event: &Event) -> &'static str {
+    match event {
+        Event::Comment { .. } => "Comment",
+        Event::Assigned { .. } => "Assigned",
+        Event::Unassigned { .. } => "Unassigned",
+        Event::Labeled { .. } => "Labeled",
+        Event::Unlabeled { .. } => "Unlabeled",
+        Event::Milestoned { .. } => "Milestoned",
+        Event::Demilestoned { .. } => "Demilestoned",
+        Event::Closed { .. } => "Closed",
+        Event::Reopened => "Reopened",
+        Event::Renamed { .. } => "Renamed",
+        Event::Merged => "Merged",
+        Event::ReviewRequested { .. } => "Review requested",
+        Event::Reviewed { .. } => "Reviewed",
+        Event::Referenced { .. } => "Referenced",
+        Event::CrossReferenced { .. } => "Cross-referenced",
+    }
+}
+
+/// Border color of a timeline box from the template.
+fn event_color(event: &Event) -> Color {
+    let colors = theme::TEMPLATE.timeline;
+    match event {
+        Event::Comment { .. } => colors.comment,
+        Event::Assigned { .. } | Event::Unassigned { .. } => colors.assigned,
+        Event::Labeled { .. } | Event::Unlabeled { .. } => colors.labeled,
+        Event::Milestoned { .. } | Event::Demilestoned { .. } => colors.milestoned,
+        Event::Closed { .. } => colors.closed,
+        Event::Reopened => colors.reopened,
+        Event::Renamed { .. } => colors.renamed,
+        Event::Merged => colors.merged,
+        Event::ReviewRequested { .. } => colors.review_requested,
+        Event::Reviewed { state, .. } => match state {
+            ReviewState::Approved => colors.approved,
+            ReviewState::ChangesRequested => colors.changes_requested,
+            _ => colors.reviewed,
+        },
+        Event::Referenced { .. } | Event::CrossReferenced { .. } => colors.referenced,
+    }
+}
+
+fn badge(label: &Label) -> Span<'static> {
+    let bg = label_color(&label.color).unwrap_or(theme::TEMPLATE.hi_bg);
+    Span::styled(
+        format!(" {} ", label.name),
+        Style::default().fg(badge_text_color(bg)).bg(bg),
+    )
+}
+
+fn review_state(state: ReviewState) -> &'static str {
+    match state {
+        ReviewState::Pending => "pending",
+        ReviewState::Approved => "approved",
+        ReviewState::ChangesRequested => "changes requested",
+        ReviewState::Commented => "commented",
+        ReviewState::Dismissed => "dismissed",
+    }
+}
+
+/// One box per timeline item: a padded comment body, or one event line.
+fn timeline_card(item: &TimelineItem, text_width: usize) -> CardText {
+    let actor = item.actor.as_deref().unwrap_or("ghost");
+    let date: String = item.created_at.chars().take(10).collect();
+    let title = format!(" {} · @{actor} · {date} ", event_name(&item.event));
+    let dim = theme::on_bg(theme::TEMPLATE.placeholder);
+    let (margin, lines): (Margin, Vec<Line<'static>>) = match &item.event {
+        Event::Comment { body } => (CARD_MARGIN, wrapped(body, text_width).collect()),
+        Event::Assigned { login } | Event::Unassigned { login } => {
+            (BOX_MARGIN, vec![Line::raw(format!("@{login}"))])
+        }
+        Event::Labeled { label } | Event::Unlabeled { label } => {
+            (BOX_MARGIN, vec![Line::from(badge(label))])
+        }
+        Event::Milestoned { title } | Event::Demilestoned { title } => {
+            (BOX_MARGIN, vec![Line::raw(title.clone())])
+        }
+        Event::Closed { reason } => (
+            BOX_MARGIN,
+            vec![Line::styled(
+                reason
+                    .as_deref()
+                    .unwrap_or("closed")
+                    .to_lowercase()
+                    .replace('_', " "),
+                dim,
+            )],
+        ),
+        Event::Reopened => (BOX_MARGIN, vec![Line::styled("reopened", dim)]),
+        Event::Renamed { from, to } => (
+            BOX_MARGIN,
+            vec![Line::from(vec![
+                Span::styled("from ", dim),
+                Span::raw(from.clone()),
+                Span::styled(" to ", dim),
+                Span::raw(to.clone()),
+            ])],
+        ),
+        Event::Merged => (BOX_MARGIN, vec![Line::styled("merged", dim)]),
+        Event::ReviewRequested { reviewer } => {
+            (BOX_MARGIN, vec![Line::raw(format!("@{reviewer}"))])
+        }
+        Event::Reviewed { state, body } => {
+            let mut lines = vec![Line::styled(review_state(*state), dim)];
+            lines.extend(wrapped(body, text_width));
+            (BOX_MARGIN, lines)
+        }
+        Event::Referenced { id, headline } => (
+            BOX_MARGIN,
+            vec![Line::from(vec![
+                Span::styled(id.clone(), dim),
+                Span::raw(format!(" {headline}")),
+            ])],
+        ),
+        Event::CrossReferenced {
+            number,
+            title,
+            repository,
+        } => (
+            BOX_MARGIN,
+            vec![Line::from(vec![
+                Span::raw(format!("#{number} {title}")),
+                Span::styled(format!("  {repository}"), dim),
+            ])],
+        ),
+    };
+    CardText {
+        title,
+        margin,
+        lines,
+        color: event_color(&item.event),
+    }
+}
+
+/// The cards stacked in a buffer as tall as they need, scrolled into `area`.
 fn render_cards(
     content: &DetailsContent,
     number: u64,
@@ -218,46 +359,38 @@ fn render_cards(
     let text_width = area.width.saturating_sub(2 + 2 * CARD_MARGIN.horizontal) as usize;
     let author = content.author.as_deref().unwrap_or("ghost");
     let mut description: Vec<Line<'static>> = vec![
-        Line::styled(content.title.clone(), theme::on_bg(COLOR_SCHEME.text_hi)),
+        Line::styled(content.title.clone(), theme::on_bg(theme::TEMPLATE.text_hi)),
         Line::from(vec![
-            Span::styled(content.state, theme::on_bg(COLOR_SCHEME.hi)),
+            Span::styled(content.state, theme::on_bg(theme::TEMPLATE.hi)),
             Span::raw("  by "),
-            Span::styled(format!("@{author}"), theme::on_bg(COLOR_SCHEME.text_hi)),
+            Span::styled(format!("@{author}"), theme::on_bg(theme::TEMPLATE.text_hi)),
         ]),
         Line::raw(""),
     ];
     description.extend(wrapped(&content.body, text_width));
-    let mut comments: Vec<Line<'static>> = Vec::new();
-    if content.comments.is_empty() {
-        comments.push(Line::raw("No comments"));
+    let mut cards = vec![CardText {
+        title: format!(" #{number} "),
+        margin: CARD_MARGIN,
+        lines: description,
+        color: theme::TEMPLATE.border,
+    }];
+    if content.timeline.is_empty() {
+        cards.push(CardText {
+            title: " Timeline ".to_string(),
+            margin: BOX_MARGIN,
+            lines: vec![Line::styled(
+                "No activity",
+                theme::on_bg(theme::TEMPLATE.placeholder),
+            )],
+            color: theme::TEMPLATE.border,
+        });
     }
-    for (i, comment) in content.comments.iter().enumerate() {
-        if i > 0 {
-            comments.push(Line::raw(""));
-        }
-        let author = comment.author.as_deref().unwrap_or("ghost");
-        let date: String = comment.created_at.chars().take(10).collect();
-        comments.push(Line::from(vec![
-            Span::styled(format!("@{author}"), theme::on_bg(COLOR_SCHEME.hi)),
-            Span::raw("  "),
-            Span::styled(date, theme::on_bg(COLOR_SCHEME.placeholder)),
-        ]));
-        comments.extend(wrapped(&comment.body, text_width));
-    }
-    let cards = [
-        CardText {
-            title: format!(" #{number} "),
-            margin: CARD_MARGIN,
-            lines: description,
-            focused: false,
-        },
-        CardText {
-            title: format!(" Comments ({}) ", content.comments.len()),
-            margin: CARD_MARGIN,
-            lines: comments,
-            focused: false,
-        },
-    ];
+    cards.extend(
+        content
+            .timeline
+            .iter()
+            .map(|item| timeline_card(item, text_width)),
+    );
     let total: u16 = cards.iter().map(CardText::height).sum();
     let mut canvas = Buffer::empty(Rect::new(0, 0, area.width, total));
     canvas.set_style(canvas.area, theme::base());
@@ -280,13 +413,13 @@ mod tests {
     use super::*;
     use crate::testkit::render_rows;
 
-    fn content(body: &str, comments: Vec<Comment>) -> DetailsContent {
+    fn content(body: &str, timeline: Vec<TimelineItem>) -> DetailsContent {
         DetailsContent {
             title: "Fix crash".into(),
             state: "open",
             author: Some("octo".into()),
             body: body.into(),
-            comments,
+            timeline,
             boxes: vec![
                 SidebarBox {
                     title: "Reviewers",
@@ -304,12 +437,16 @@ mod tests {
         }
     }
 
-    fn comment(author: Option<&str>, body: &str) -> Comment {
-        Comment {
-            author: author.map(String::from),
+    fn item(actor: Option<&str>, event: Event) -> TimelineItem {
+        TimelineItem {
+            actor: actor.map(String::from),
             created_at: "2026-09-04T10:00:00Z".into(),
-            body: body.into(),
+            event,
         }
+    }
+
+    fn comment(actor: Option<&str>, body: &str) -> TimelineItem {
+        item(actor, Event::Comment { body: body.into() })
     }
 
     /// Columns of the bar for an 80 column screen: inset 4, border 1, margin 1 on each side.
@@ -321,8 +458,18 @@ mod tests {
             .collect()
     }
 
+    fn left_of(rows: &[String]) -> Vec<String> {
+        rows.iter()
+            .map(|r| r.chars().take(BAR_LEFT_80).collect())
+            .collect()
+    }
+
+    fn blank(r: &str) -> bool {
+        r.chars().all(|c| c == '│' || c == ' ')
+    }
+
     #[test]
-    /// TU-R-059, TU-R-065 — centered overlay reading the loading message until a result arrives; a failure shows its message.
+    /// TU-R-059, TU-R-065 — centered overlay with a loading box until a result arrives; a failure shows its message in a box.
     fn ut_loading_then_failure() {
         let mut d = DetailsDialog::new(5, "Fix crash".into(), "Loading thing..");
         let rows = render_rows(80, 24, |f| d.render(f.area(), f.buffer_mut()));
@@ -357,7 +504,7 @@ mod tests {
         );
         assert!(
             rows[at - 1].find('┌').expect("corner") > 10,
-            "small box, not the overlay border: {}",
+            "small box: {}",
             rows[at - 1]
         );
         assert!(rows[20].contains('└'), "{}", rows[20]);
@@ -374,32 +521,28 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-066 — description card with title, state and author line and body inside a 2 by 1 padding; comments card below; `j`/`k` scroll within bounds.
-    fn ut_cards_and_scrolling() {
+    /// TU-R-066, TU-E-028 — description card with title, state and author line and body inside a 2 by 1 margin; one padded box per comment titled with type, actor and date; `j`/`k` scroll within bounds.
+    fn ut_description_and_comment_boxes() {
         let mut d = DetailsDialog::new(5, "Fix crash".into(), "L");
-        let comments = vec![comment(Some("a"), "LGTM"), comment(None, "ghost says hi")];
+        let timeline = vec![comment(Some("a"), "LGTM"), comment(None, "ghost says hi")];
         d.set_result(Ok::<_, String>(content(
             "Fixes the crash on start.",
-            comments,
+            timeline,
         )));
         let rows = render_rows(80, 30, |f| d.render(f.area(), f.buffer_mut()));
-        let left: Vec<String> = rows
-            .iter()
-            .map(|r| r.chars().take(BAR_LEFT_80).collect())
-            .collect();
+        let left = left_of(&rows);
         let card = left
             .iter()
             .position(|r| r.contains("┌ #5 "))
-            .expect("description card title");
-        let blank = |r: &String| r.chars().all(|c| c == '│' || c == ' ');
+            .expect("description card");
         assert!(
             blank(&left[card + 1]),
-            "vertical padding: {}",
+            "vertical margin: {}",
             left[card + 1]
         );
         assert!(
             left[card + 2].starts_with("    │ │  Fix crash"),
-            "horizontal padding: {}",
+            "horizontal margin: {}",
             left[card + 2]
         );
         assert!(
@@ -415,44 +558,37 @@ mod tests {
         );
         assert!(
             blank(&left[card + 6]),
-            "vertical padding: {}",
+            "vertical margin: {}",
             left[card + 6]
         );
         assert!(left[card + 7].contains('└'), "{}", left[card + 7]);
-        let comments_card = left
-            .iter()
-            .position(|r| r.contains("Comments (2)"))
-            .expect("comments card");
-        assert_eq!(comments_card, card + 8, "{left:?}");
+        let first = card + 8;
         assert!(
-            left[comments_card + 2].contains("@a")
-                && left[comments_card + 2].contains("2026-09-04"),
+            left[first].contains("┌ Comment · @a · 2026-09-04 "),
             "{}",
-            left[comments_card + 2]
+            left[first]
         );
         assert!(
-            left[comments_card + 3].contains("LGTM"),
+            blank(&left[first + 1]),
+            "comment box keeps the vertical margin: {}",
+            left[first + 1]
+        );
+        assert!(left[first + 2].contains("LGTM"), "{}", left[first + 2]);
+        assert!(blank(&left[first + 3]), "{}", left[first + 3]);
+        assert!(left[first + 4].contains('└'), "{}", left[first + 4]);
+        assert!(
+            left[first + 5].contains("┌ Comment · @ghost · 2026-09-04 "),
             "{}",
-            left[comments_card + 3]
+            left[first + 5]
         );
         assert!(
-            blank(&left[comments_card + 4]),
+            left[first + 7].contains("ghost says hi"),
             "{}",
-            left[comments_card + 4]
-        );
-        assert!(
-            left[comments_card + 5].contains("@ghost"),
-            "{}",
-            left[comments_card + 5]
-        );
-        assert!(
-            left[comments_card + 6].contains("ghost says hi"),
-            "{}",
-            left[comments_card + 6]
+            left[first + 7]
         );
 
         let mut d = DetailsDialog::new(5, "Fix crash".into(), "L");
-        let many: Vec<Comment> = (1..=30)
+        let many: Vec<TimelineItem> = (1..=30)
             .map(|n| comment(Some("a"), &format!("comment {n}")))
             .collect();
         d.set_result(Ok::<_, String>(content("body", many)));
@@ -468,7 +604,7 @@ mod tests {
             "scrolled to the end: {rows:?}"
         );
         assert!(
-            rows.iter().any(|r| r.contains("comment 2")),
+            rows.iter().any(|r| r.contains("comment 29")),
             "no scrolling past the end: {rows:?}"
         );
         for _ in 0..500 {
@@ -479,8 +615,142 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-066 — a body line wider than the card wraps; without comments the card reads `No comments`; a deleted author reads `ghost`.
-    fn ut_wrapping_and_empty_comments() {
+    /// TU-R-066, TU-R-070 — every event type renders as a compact box with its name, its line and the template color of its type.
+    fn ut_event_boxes() {
+        let bug = Label {
+            name: "bug".into(),
+            color: "d73a4a".into(),
+        };
+        let timeline = vec![
+            item(Some("o"), Event::Assigned { login: "b".into() }),
+            item(Some("o"), Event::Unassigned { login: "b".into() }),
+            item(Some("o"), Event::Labeled { label: bug.clone() }),
+            item(Some("o"), Event::Unlabeled { label: bug }),
+            item(Some("o"), Event::Milestoned { title: "v1".into() }),
+            item(Some("o"), Event::Demilestoned { title: "v1".into() }),
+            item(
+                Some("o"),
+                Event::Closed {
+                    reason: Some("NOT_PLANNED".into()),
+                },
+            ),
+            item(Some("o"), Event::Closed { reason: None }),
+            item(Some("o"), Event::Reopened),
+            item(
+                Some("o"),
+                Event::Renamed {
+                    from: "Old".into(),
+                    to: "New".into(),
+                },
+            ),
+            item(Some("o"), Event::Merged),
+            item(
+                Some("o"),
+                Event::ReviewRequested {
+                    reviewer: "core".into(),
+                },
+            ),
+            item(
+                Some("r"),
+                Event::Reviewed {
+                    state: ReviewState::Approved,
+                    body: "ship it".into(),
+                },
+            ),
+            item(
+                Some("r"),
+                Event::Reviewed {
+                    state: ReviewState::ChangesRequested,
+                    body: String::new(),
+                },
+            ),
+            item(
+                Some("r"),
+                Event::Reviewed {
+                    state: ReviewState::Commented,
+                    body: String::new(),
+                },
+            ),
+            item(
+                Some("o"),
+                Event::Referenced {
+                    id: "abc1234".into(),
+                    headline: "Fix it".into(),
+                },
+            ),
+            item(
+                Some("o"),
+                Event::CrossReferenced {
+                    number: 9,
+                    title: "Follow-up".into(),
+                    repository: "o/r".into(),
+                },
+            ),
+        ];
+        let expected: Vec<(&str, &str, Color)> = {
+            let c = theme::TEMPLATE.timeline;
+            vec![
+                ("Assigned", "@b", c.assigned),
+                ("Unassigned", "@b", c.assigned),
+                ("Labeled", " bug ", c.labeled),
+                ("Unlabeled", " bug ", c.labeled),
+                ("Milestoned", "v1", c.milestoned),
+                ("Demilestoned", "v1", c.milestoned),
+                ("Closed", "not planned", c.closed),
+                ("Closed", "closed", c.closed),
+                ("Reopened", "reopened", c.reopened),
+                ("Renamed", "from Old to New", c.renamed),
+                ("Merged", "merged", c.merged),
+                ("Review requested", "@core", c.review_requested),
+                ("Reviewed", "approved", c.approved),
+                ("Reviewed", "changes requested", c.changes_requested),
+                ("Reviewed", "commented", c.reviewed),
+                ("Referenced", "abc1234 Fix it", c.referenced),
+                ("Cross-referenced", "#9 Follow-up  o/r", c.referenced),
+            ]
+        };
+        let mut d = DetailsDialog::new(5, "T".into(), "L");
+        d.set_result(Ok::<_, String>(content("b", timeline)));
+        let area = Rect::new(0, 0, 100, 80);
+        let mut buf = Buffer::empty(area);
+        d.render(area, &mut buf);
+        let row =
+            |y: u16| -> String { (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+        let rows: Vec<String> = (0..80).map(row).collect();
+        let description_end = rows
+            .iter()
+            .position(|r| r.contains("└") && r.contains("│ └"))
+            .expect("description end");
+        let mut y = description_end + 1;
+        for (name, line, color) in expected {
+            let title = format!("┌ {name} · @");
+            assert!(
+                rows[y].contains(&title),
+                "box {name} at row {y}: {}",
+                rows[y]
+            );
+            assert!(rows[y + 1].contains(line), "{name} line: {}", rows[y + 1]);
+            let height = if line == "approved" { 4 } else { 3 };
+            assert!(
+                rows[y + height - 1].contains('└'),
+                "{name} compact: {}",
+                rows[y + height - 1]
+            );
+            let x = rows[y].find('┌').expect("corner");
+            let x = rows[y][..x].chars().count() as u16;
+            assert_eq!(buf[(x, y as u16)].fg, color, "{name} border color");
+            y += height;
+        }
+        let ship = rows
+            .iter()
+            .position(|r| r.contains("ship it"))
+            .expect("review body");
+        assert!(rows[ship - 1].contains("approved"), "{}", rows[ship - 1]);
+    }
+
+    #[test]
+    /// TU-R-066, TU-E-027 — a body line wider than the card wraps; without timeline items one box reads `No activity`; a deleted author reads `ghost`.
+    fn ut_wrapping_and_empty_timeline() {
         let mut d = DetailsDialog::new(5, "T".into(), "L");
         let mut c = content(&"word ".repeat(40), vec![]);
         c.author = None;
@@ -494,9 +764,10 @@ mod tests {
         assert!(rows.iter().any(|r| r.contains("by @ghost")), "{rows:?}");
         let card = rows
             .iter()
-            .position(|r| r.contains("Comments (0)"))
+            .position(|r| r.contains("┌ Timeline "))
             .expect("card");
-        assert!(rows[card + 2].contains("No comments"), "{}", rows[card + 2]);
+        assert!(rows[card + 1].contains("No activity"), "{}", rows[card + 1]);
+        assert!(rows[card + 2].contains('└'), "{}", rows[card + 2]);
     }
 
     #[test]
@@ -541,11 +812,7 @@ mod tests {
             let mut buf = Buffer::empty(area);
             d.render(area, &mut buf);
             let mut out = Vec::new();
-            for (title, y) in [("Reviewers", 0), ("Assignees", 0), ("Labels", 0)]
-                .iter()
-                .map(|(t, _)| (*t, 0))
-            {
-                let _ = y;
+            for title in ["Reviewers", "Assignees", "Labels"] {
                 let row = (0..30u16)
                     .find(|y| {
                         (0..80u16).any(|x| {
@@ -559,7 +826,7 @@ mod tests {
                 let corner = (BAR_LEFT_80 as u16..80)
                     .find(|x| buf[(*x, row)].symbol() == "┌")
                     .expect("corner");
-                if buf[(corner, row)].fg == COLOR_SCHEME.hi {
+                if buf[(corner, row)].fg == theme::TEMPLATE.hi {
                     out.push(title);
                 }
             }

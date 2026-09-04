@@ -1,6 +1,5 @@
 //! Pull request details as overlay content.
 
-use ferrowl_ui::COLOR_SCHEME;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
@@ -37,7 +36,7 @@ pub fn badges(labels: &[crate::github::board::Label]) -> Vec<Line<'static>> {
     labels
         .iter()
         .map(|l| {
-            let bg = label_color(&l.color).unwrap_or(COLOR_SCHEME.hi_bg);
+            let bg = label_color(&l.color).unwrap_or(theme::TEMPLATE.hi_bg);
             Line::from(Span::styled(
                 format!(" {} ", l.name),
                 Style::default().fg(badge_text_color(bg)).bg(bg),
@@ -56,7 +55,7 @@ pub fn content(details: PullDetails) -> DetailsContent {
                 Span::raw(format!("@{} ", r.name)),
                 Span::styled(
                     review_state(r.state),
-                    theme::on_bg(COLOR_SCHEME.placeholder),
+                    theme::on_bg(theme::TEMPLATE.placeholder),
                 ),
             ])
         })
@@ -72,7 +71,7 @@ pub fn content(details: PullDetails) -> DetailsContent {
         state,
         author: details.author,
         body: details.body,
-        comments: details.comments,
+        timeline: details.timeline,
         boxes: vec![
             SidebarBox {
                 title: "Reviewers",

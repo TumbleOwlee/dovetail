@@ -1,7 +1,6 @@
 //! The Task Board tab body: columns of cards with a single selection.
 
 use crossterm::event::KeyCode;
-use ferrowl_ui::COLOR_SCHEME;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Style};
@@ -64,7 +63,7 @@ impl BoardView {
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
-        let base = Style::default().fg(COLOR_SCHEME.text).bg(theme::BG);
+        let base = Style::default().fg(theme::TEMPLATE.text).bg(theme::BG);
         buf.set_style(area, base);
         if self.board.columns.is_empty() || area.height == 0 {
             return;
@@ -73,10 +72,10 @@ impl BoardView {
         let columns = Layout::horizontal(widths).split(area);
         for (i, (column, rect)) in self.board.columns.iter().zip(columns.iter()).enumerate() {
             let block = Block::bordered()
-                .style(Style::default().fg(COLOR_SCHEME.border).bg(theme::BG))
+                .style(Style::default().fg(theme::TEMPLATE.border).bg(theme::BG))
                 .title(Span::styled(
                     format!(" {} ({}) ", column.name, column.cards.len()),
-                    Style::default().fg(COLOR_SCHEME.hi).bg(theme::BG),
+                    Style::default().fg(theme::TEMPLATE.hi).bg(theme::BG),
                 ));
             let body = block.inner(*rect);
             block.render(*rect, buf);
@@ -173,9 +172,9 @@ pub fn wrap_title(title: &str, width: usize) -> Vec<String> {
 
 fn render_card(card: &Card, area: Rect, buf: &mut Buffer, highlighted: bool) {
     let border = if highlighted {
-        Style::default().fg(COLOR_SCHEME.hi).bg(theme::BG)
+        Style::default().fg(theme::TEMPLATE.hi).bg(theme::BG)
     } else {
-        Style::default().fg(COLOR_SCHEME.border).bg(theme::BG)
+        Style::default().fg(theme::TEMPLATE.border).bg(theme::BG)
     };
     let mut assignees: Vec<Span> = Vec::new();
     for (i, login) in card.assignees.iter().enumerate() {
@@ -185,8 +184,8 @@ fn render_card(card: &Card, area: Rect, buf: &mut Buffer, highlighted: bool) {
         assignees.push(Span::styled(
             format!(" @{login} "),
             Style::default()
-                .fg(COLOR_SCHEME.text_hi)
-                .bg(COLOR_SCHEME.hi_bg),
+                .fg(theme::TEMPLATE.text_hi)
+                .bg(theme::TEMPLATE.hi_bg),
         ));
     }
     let block = Block::bordered()
@@ -204,11 +203,11 @@ fn render_card(card: &Card, area: Rect, buf: &mut Buffer, highlighted: bool) {
     .areas(inner);
     let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
     Paragraph::new(text)
-        .style(Style::default().fg(COLOR_SCHEME.text_hi).bg(theme::BG))
+        .style(Style::default().fg(theme::TEMPLATE.text_hi).bg(theme::BG))
         .render(title, buf);
     let mut spans: Vec<Span> = Vec::new();
     for label in &card.labels {
-        let bg = label_color(&label.color).unwrap_or(COLOR_SCHEME.hi_bg);
+        let bg = label_color(&label.color).unwrap_or(theme::TEMPLATE.hi_bg);
         spans.push(Span::styled(
             format!(" {} ", label.name),
             Style::default().fg(badge_text_color(bg)).bg(bg),
@@ -510,9 +509,9 @@ mod tests {
         assert!(row(3).contains("Board is loading.."), "{}", row(3));
         assert!(row(2).contains('┌') && row(4).contains('└'), "{}", row(2));
         let corner = row(2).find('┌').expect("corner") as u16;
-        assert_eq!(buf[(corner, 2)].fg, COLOR_SCHEME.hi);
+        assert_eq!(buf[(corner, 2)].fg, theme::TEMPLATE.hi);
         let text = row(3).find('B').expect("text") as u16;
-        assert_eq!(buf[(text, 3)].fg, COLOR_SCHEME.hi);
+        assert_eq!(buf[(text, 3)].fg, theme::TEMPLATE.hi);
         assert_eq!(buf[(text, 3)].bg, theme::BG);
         assert_eq!(buf[(0, 0)].bg, theme::BG, "the whole body is painted");
     }
@@ -527,6 +526,6 @@ mod tests {
         let x = (0..60)
             .find(|x| buf[(*x, 3)].symbol() == "F" && buf[(*x + 1, 3)].symbol() == "i")
             .expect("title");
-        assert_eq!(buf[(x, 3)].fg, COLOR_SCHEME.text_hi);
+        assert_eq!(buf[(x, 3)].fg, theme::TEMPLATE.text_hi);
     }
 }

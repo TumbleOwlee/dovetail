@@ -4,11 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use super::board::{Assignee, Label, LabelNode, Nodes};
 use super::projects::GithubError;
-use super::pull::Comment;
+use super::timeline::{self, TimelineItem};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
-const QUERY: &str = "query($id: ID!, $after: String) { node(id: $id) { __typename ... on Issue { title number state body url author { login } repository { nameWithOwner } labels(first: 10) { nodes { name color } } assignees(first: 5) { nodes { login } } projectItems(first: 10) { nodes { project { title } } } milestone { title } parent { number title } subIssues(first: 20) { nodes { number title } } closedByPullRequestsReferences(first: 10) { nodes { number title } } participants(first: 20) { nodes { login } } comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { body createdAt author { login } } } } } }";
+const QUERY_HEAD: &str = "query($id: ID!, $after: String) { node(id: $id) { __typename ... on Issue { title number state body url author { login } repository { nameWithOwner } labels(first: 10) { nodes { name color } } assignees(first: 5) { nodes { login } } projectItems(first: 10) { nodes { project { title } } } milestone { title } parent { number title } subIssues(first: 20) { nodes { number title } } closedByPullRequestsReferences(first: 10) { nodes { number title } } participants(first: 20) { nodes { login } }";
+
+const QUERY_TAIL: &str = " } } }";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -36,14 +38,14 @@ pub struct Issue {
     /// Closing pull requests as `#<number> <title>`.
     pub development: Vec<String>,
     pub participants: Vec<String>,
-    pub comments: Vec<Comment>,
+    pub timeline: Vec<TimelineItem>,
 }
 
-/// One page of a details response: the issue with this page's comments.
+/// One page of a details response: the issue with this page's timeline items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
     pub issue: Issue,
-    /// Cursor of the next comments page, `None` on the last page.
+    /// Cursor of the next timeline page, `None` on the last page.
     pub next_cursor: Option<String>,
 }
 
@@ -59,10 +61,18 @@ struct Variables<'a> {
     after: Option<&'a str>,
 }
 
+/// The query with the issue timeline selection in place.
+fn query() -> String {
+    format!(
+        "{QUERY_HEAD} {} {QUERY_TAIL}",
+        timeline::selection(timeline::ISSUE_ITEM_TYPES)
+    )
+}
+
 /// The JSON body sent to the GraphQL endpoint.
 pub fn request_body(id: &str, after: Option<&str>) -> String {
     serde_json::to_string(&Request {
-        query: QUERY,
+        query: &query(),
         variables: Variables { id, after },
     })
     .expect("a request of plain values serializes")
@@ -110,7 +120,7 @@ struct IssueNode {
     sub_issues: Nodes<Ref>,
     closed_by_pull_requests_references: Nodes<Ref>,
     participants: Nodes<Assignee>,
-    comments: Connection,
+    timeline_items: timeline::Connection,
 }
 
 #[derive(Deserialize)]
@@ -127,28 +137,6 @@ struct Titled {
 struct Ref {
     number: u64,
     title: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Connection {
-    page_info: PageInfo,
-    nodes: Vec<CommentNode>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PageInfo {
-    has_next_page: bool,
-    end_cursor: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CommentNode {
-    body: String,
-    created_at: String,
-    author: Option<Author>,
 }
 
 #[derive(Deserialize)]
@@ -175,9 +163,7 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
     let Some(Node::Issue(node)) = response.data.and_then(|d| d.node) else {
         return Err(GithubError::MissingIssue);
     };
-    let next_cursor = Some(node.comments.page_info)
-        .filter(|p| p.has_next_page)
-        .and_then(|p| p.end_cursor);
+    let next_cursor = node.timeline_items.next_cursor();
     let reference = |prefix: &str, r: Ref| format!("{prefix}#{} {}", r.number, r.title);
     let mut relationships: Vec<String> = node
         .parent
@@ -229,16 +215,7 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
                 .into_iter()
                 .map(|a| a.login)
                 .collect(),
-            comments: node
-                .comments
-                .nodes
-                .into_iter()
-                .map(|c| Comment {
-                    author: c.author.map(|a| a.login),
-                    created_at: c.created_at,
-                    body: c.body,
-                })
-                .collect(),
+            timeline: node.timeline_items.items(),
         },
         next_cursor,
     })
@@ -272,7 +249,7 @@ pub async fn load_issue(
         }
         let page = parse_page(&response.text().await?)?;
         match issue.as_mut() {
-            Some(issue) => issue.comments.extend(page.issue.comments),
+            Some(issue) => issue.timeline.extend(page.issue.timeline),
             None => issue = Some(page.issue),
         }
         cursor = page.next_cursor;
@@ -290,7 +267,7 @@ mod tests {
         "projectItems":{"nodes":[{"project":{"title":"Roadmap"}}]},"milestone":{"title":"v1"},
         "parent":{"number":3,"title":"Epic"},"subIssues":{"nodes":[{"number":8,"title":"Child"}]},
         "closedByPullRequestsReferences":{"nodes":[{"number":5,"title":"Fix crash"}]},"participants":{"nodes":[{"login":"octo"},{"login":"a"}]},
-        "comments":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[{"body":"LGTM","createdAt":"2026-09-04T10:00:00Z","author":{"login":"a"}}]}}}}"#;
+        "timelineItems":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[{"__typename":"IssueComment","body":"LGTM","createdAt":"2026-09-04T10:00:00Z","author":{"login":"a"}},{"__typename":"ClosedEvent","actor":{"login":"octo"},"createdAt":"2026-09-05T10:00:00Z","stateReason":"COMPLETED"}]}}}}"#;
 
     #[test]
     /// GH-R-010 — the query asks for the node by id with every detail field.
@@ -300,6 +277,10 @@ mod tests {
         assert_eq!(body["variables"]["id"], "I_1");
         assert_eq!(body["variables"]["after"], "abc");
         let query = body["query"].as_str().expect("query");
+        assert!(
+            !query.contains("MERGED_EVENT") && !query.contains("PULL_REQUEST_REVIEW"),
+            "{query}"
+        );
         for part in [
             "node(id: $id)",
             "... on Issue",
@@ -315,7 +296,8 @@ mod tests {
             "subIssues(first: 20) { nodes { number title } }",
             "closedByPullRequestsReferences(first: 10) { nodes { number title } }",
             "participants(first: 20) { nodes { login } }",
-            "comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { body createdAt author { login } } }",
+            "timelineItems(first: 100, after: $after, itemTypes: [ISSUE_COMMENT, ",
+            "... on ClosedEvent { actor { login } createdAt stateReason }",
         ] {
             assert!(query.contains(part), "{part} missing in {query}");
         }
@@ -345,8 +327,8 @@ mod tests {
     }
 
     #[test]
-    /// GH-R-010 — sidebar fields and comments are carried; the cursor follows `hasNextPage`; missing parent and milestone are absent.
-    fn ut_parse_sidebar_and_comments() {
+    /// GH-R-010, GH-R-017 — sidebar fields and timeline items are carried; the cursor follows `hasNextPage`; missing parent and milestone are absent.
+    fn ut_parse_sidebar_and_timeline() {
         let page = parse_page(BODY).expect("parses");
         assert_eq!(page.next_cursor.as_deref(), Some("cur"));
         let issue = page.issue;
@@ -361,9 +343,20 @@ mod tests {
             issue.participants,
             vec!["octo".to_string(), "a".to_string()]
         );
-        assert_eq!(issue.comments.len(), 1);
-        assert_eq!(issue.comments[0].author.as_deref(), Some("a"));
-        assert_eq!(issue.comments[0].body, "LGTM");
+        assert_eq!(issue.timeline.len(), 2);
+        assert_eq!(issue.timeline[0].actor.as_deref(), Some("a"));
+        assert_eq!(
+            issue.timeline[0].event,
+            timeline::Event::Comment {
+                body: "LGTM".into()
+            }
+        );
+        assert_eq!(
+            issue.timeline[1].event,
+            timeline::Event::Closed {
+                reason: Some("COMPLETED".into())
+            }
+        );
         let bare = BODY
             .replace(r#""milestone":{"title":"v1"}"#, r#""milestone":null"#)
             .replace(

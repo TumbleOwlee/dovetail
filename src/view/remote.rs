@@ -1,11 +1,11 @@
 //! Git Remote tab body: the pull request table.
 
 use crossterm::event::{KeyCode, KeyModifiers};
+use ferrowl_ui::Border;
 use ferrowl_ui::state::{TableState, TableStateBuilder};
 use ferrowl_ui::style::TableStyle;
 use ferrowl_ui::traits::HandleEvents;
 use ferrowl_ui::widgets::{Header, Table, TableBuilder, TableEntry, Widget, Width};
-use ferrowl_ui::{Border, COLOR_SCHEME};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::Style;
@@ -60,10 +60,10 @@ impl TableEntry<COLUMNS> for PullRow {
 
     fn cell_styles(&self) -> [Option<Style>; COLUMNS] {
         let color = match (self.0.state, self.0.draft) {
-            (PullState::Open, false) => COLOR_SCHEME.success,
-            (PullState::Open, true) => COLOR_SCHEME.placeholder,
-            (PullState::Merged, _) => COLOR_SCHEME.hi,
-            (PullState::Closed, _) => COLOR_SCHEME.error,
+            (PullState::Open, false) => theme::TEMPLATE.success,
+            (PullState::Open, true) => theme::TEMPLATE.placeholder,
+            (PullState::Merged, _) => theme::TEMPLATE.hi,
+            (PullState::Closed, _) => theme::TEMPLATE.error,
         };
         [
             None,
@@ -93,8 +93,8 @@ impl RemoteView {
     /// Rows in the given order, the first selected.
     pub fn new(pulls: Vec<PullRequest>) -> RemoteView {
         let style = TableStyle {
-            border: theme::on_bg(COLOR_SCHEME.border),
-            general: theme::on_bg(COLOR_SCHEME.border),
+            border: theme::on_bg(theme::TEMPLATE.border),
+            general: theme::on_bg(theme::TEMPLATE.border),
             ..TableStyle::default()
         };
         RemoteView {

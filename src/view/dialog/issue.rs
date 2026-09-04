@@ -17,7 +17,7 @@ pub fn content(issue: Issue) -> DetailsContent {
         state,
         author: issue.author,
         body: issue.body,
-        comments: issue.comments,
+        timeline: issue.timeline,
         boxes: vec![
             SidebarBox {
                 title: "Assignees",
@@ -55,7 +55,7 @@ pub fn content(issue: Issue) -> DetailsContent {
 mod tests {
     use super::*;
     use crate::github::board::Label;
-    use crate::github::pull::Comment;
+    use crate::github::timeline::{Event, TimelineItem};
 
     #[test]
     /// TU-R-060 — state and author carried; seven boxes in order with logins, badges, references and relationships.
@@ -78,10 +78,12 @@ mod tests {
             relationships: vec!["parent #3 Epic".into(), "sub #8 Child".into()],
             development: vec!["#5 Fix crash".into()],
             participants: vec!["octo".into()],
-            comments: vec![Comment {
-                author: Some("a".into()),
+            timeline: vec![TimelineItem {
+                actor: Some("a".into()),
                 created_at: "2026-09-04T10:00:00Z".into(),
-                body: "LGTM".into(),
+                event: Event::Comment {
+                    body: "LGTM".into(),
+                },
             }],
         };
         let c = content(issue);
@@ -89,7 +91,7 @@ mod tests {
             (c.state, c.author, c.title.as_str()),
             ("closed", None, "Crash on start")
         );
-        assert_eq!(c.comments.len(), 1);
+        assert_eq!(c.timeline.len(), 1);
         let titles: Vec<&str> = c.boxes.iter().map(|b| b.title).collect();
         assert_eq!(
             titles,

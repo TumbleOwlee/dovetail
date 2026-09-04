@@ -56,3 +56,5 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-024** | A pull request has no comments | The comments card reads `No comments`; cites TU-R-066 |
 | **TU-E-025** | Pull request details arrive after the overlay was closed | Discarded; cites TU-R-065 |
 | **TU-E-026** | The right bar's boxes need more rows than the overlay has | Later boxes are cut off at the bottom; the left content still scrolls; cites TU-R-068 |
+| **TU-E-027** | An issue or pull request has no timeline items | One box titled `Timeline` reading `No activity` follows the description card; cites TU-R-066 |
+| **TU-E-028** | A timeline item's actor account was deleted | The title shows `@ghost`; cites TU-R-066 |

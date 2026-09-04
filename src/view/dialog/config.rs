@@ -4,6 +4,7 @@
 use std::num::NonZeroU64;
 
 use crossterm::event::{KeyCode, KeyModifiers};
+use ferrowl_ui::Border;
 use ferrowl_ui::state::{
     InputFieldState, InputFieldStateBuilder, SelectionState, SelectionStateBuilder,
 };
@@ -11,7 +12,6 @@ use ferrowl_ui::traits::{HandleEvents, SetFocus, ToLabel};
 use ferrowl_ui::widgets::{
     GetValue, InputField, InputFieldBuilder, Selection, SelectionBuilder, Widget,
 };
-use ferrowl_ui::{Border, COLOR_SCHEME};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, HorizontalAlignment, Layout, Margin, Rect};
 use ratatui::style::Style;
@@ -618,11 +618,11 @@ impl ConfigDialog {
             Constraint::Fill(1),
         ])
         .areas(hcenter);
-        let base = Style::default().fg(COLOR_SCHEME.text).bg(theme::BG);
+        let base = Style::default().fg(theme::TEMPLATE.text).bg(theme::BG);
         Clear.render(boxed, buf);
         buf.set_style(boxed, base);
         let block = Block::bordered()
-            .style(Style::default().fg(COLOR_SCHEME.hi).bg(theme::BG))
+            .style(Style::default().fg(theme::TEMPLATE.hi).bg(theme::BG))
             .title("Configuration")
             .title_alignment(HorizontalAlignment::Center);
         let inner = block.inner(boxed).inner(Margin::new(1, 0));
@@ -672,11 +672,15 @@ impl ConfigDialog {
 
         if let Some(message) = self.error() {
             Paragraph::new(message)
-                .style(Style::default().fg(COLOR_SCHEME.error).bg(theme::BG))
+                .style(Style::default().fg(theme::TEMPLATE.error).bg(theme::BG))
                 .render(error, buf);
         }
         Paragraph::new(KEYS)
-            .style(Style::default().fg(COLOR_SCHEME.placeholder).bg(theme::BG))
+            .style(
+                Style::default()
+                    .fg(theme::TEMPLATE.placeholder)
+                    .bg(theme::BG),
+            )
             .render(keys, buf);
     }
 

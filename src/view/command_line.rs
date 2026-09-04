@@ -6,7 +6,7 @@ use ferrowl_ui::state::{InputFieldState, InputFieldStateBuilder};
 use ferrowl_ui::style::InputFieldStyle;
 use ferrowl_ui::traits::{HandleEvents, SetFocus};
 use ferrowl_ui::widgets::{InputField, InputFieldBuilder, Widget};
-use ferrowl_ui::{Border, COLOR_SCHEME, EventResult};
+use ferrowl_ui::{Border, EventResult};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::Style;
@@ -49,7 +49,7 @@ impl Default for CommandLine {
 
 impl CommandLine {
     pub fn new() -> CommandLine {
-        let base = Style::default().fg(COLOR_SCHEME.text).bg(theme::BG);
+        let base = Style::default().fg(theme::TEMPLATE.text).bg(theme::BG);
         let state = InputFieldStateBuilder::default()
             .focused(false)
             // An empty placeholder keeps the widget's "Enter value.." hint off the line.
@@ -135,18 +135,18 @@ impl CommandLine {
 
     /// The bottom line: the prompt while open; else the error, the notice, or the hint bar.
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
-        let base = Style::default().fg(COLOR_SCHEME.text).bg(theme::BG);
+        let base = Style::default().fg(theme::TEMPLATE.text).bg(theme::BG);
         buf.set_style(area, base);
         if self.open {
             let [prompt, rest] =
                 Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
             Paragraph::new(":")
-                .style(Style::default().fg(COLOR_SCHEME.hi).bg(theme::BG))
+                .style(Style::default().fg(theme::TEMPLATE.hi).bg(theme::BG))
                 .render(prompt, buf);
             StatefulWidget::render(&self.input.widget, rest, buf, &mut self.input.state);
         } else if let Some(error) = self.error() {
             Paragraph::new(error)
-                .style(Style::default().fg(COLOR_SCHEME.error).bg(theme::BG))
+                .style(Style::default().fg(theme::TEMPLATE.error).bg(theme::BG))
                 .render(area, buf);
         } else if let Some(notice) = &self.notice {
             Paragraph::new(notice.as_str())
@@ -163,8 +163,8 @@ impl CommandLine {
         if !self.open || bounds.height < 3 {
             return;
         }
-        let usage_style = Style::default().fg(COLOR_SCHEME.hi).bg(theme::BG).bold();
-        let desc_style = Style::default().fg(COLOR_SCHEME.text).bg(theme::BG);
+        let usage_style = Style::default().fg(theme::TEMPLATE.hi).bg(theme::BG).bold();
+        let desc_style = Style::default().fg(theme::TEMPLATE.text).bg(theme::BG);
         let lines: Vec<Line> = HELP
             .iter()
             .map(|(usage, desc)| {
@@ -182,7 +182,7 @@ impl CommandLine {
             height,
         };
         Clear.render(popup, buf);
-        let block = Block::bordered().style(Style::default().fg(COLOR_SCHEME.hi).bg(theme::BG));
+        let block = Block::bordered().style(Style::default().fg(theme::TEMPLATE.hi).bg(theme::BG));
         let inner = block.inner(popup);
         block.render(popup, buf);
         Paragraph::new(lines)

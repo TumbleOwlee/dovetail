@@ -1,6 +1,5 @@
 //! Centered box for an outstanding request or its failure.
 
-use ferrowl_ui::COLOR_SCHEME;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::Color;
@@ -10,12 +9,12 @@ use crate::view::theme;
 
 /// Paints `area` and draws `message` in a bordered box centered in it, both in the highlight color.
 pub fn render_loading(area: Rect, buf: &mut Buffer, message: &str) {
-    render(area, buf, message, COLOR_SCHEME.hi);
+    render(area, buf, message, theme::TEMPLATE.hi);
 }
 
 /// Paints `area` and draws `message` in a bordered box centered in it, both in the error color.
 pub fn render_error(area: Rect, buf: &mut Buffer, message: &str) {
-    render(area, buf, message, COLOR_SCHEME.error);
+    render(area, buf, message, theme::TEMPLATE.error);
 }
 
 fn render(area: Rect, buf: &mut Buffer, message: &str, color: Color) {

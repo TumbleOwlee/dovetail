@@ -14,7 +14,7 @@ TUI application, stack: Rust (stable toolchain, pinned via `rust-toolchain.toml`
 | `config` | Serde schema of both files, resolution, validation, profile derivation, writers, origin URL parsing | `config` |
 | `app` | Held state: configuration, settings, active tab, open dialog, command line; key dispatch; frame layout | `tui` |
 | `event` | The async loop over terminal events and application messages; runs fetches the app queues and sends their outcomes back | `tui` |
-| `github` | GitHub API calls via GraphQL: listing an owner's Projects (v2), loading a project board's Status columns and issue cards, loading one issue's details with its comments and sidebar fields by node id, listing a repository's pull requests, loading one pull request with its comments | `github` |
+| `github` | GitHub API calls via GraphQL: listing an owner's Projects (v2), loading a project board's Status columns and issue cards, loading one issue's details with its timeline and sidebar fields by node id, listing a repository's pull requests, loading one pull request with its timeline; `github::timeline` decodes the timeline items both share | `github` |
 | `atlassian` | Atlassian REST calls: listing a Jira site's projects | `atlassian` |
 | `command` | `Cmd` parser and the help rows | `tui` |
 | `view::tabs` | Tab line and per-tab summary body | `tui` |
@@ -23,7 +23,7 @@ TUI application, stack: Rust (stable toolchain, pinned via `rust-toolchain.toml`
 | `view::board` | Task Board tab body: columns of issue cards with labels and assignee badges, one selection, keyboard navigation | `tui` |
 | `view::command_line` | The `:` prompt, the help box above it while open, and the hint bar, error or notice shown while closed | `tui` |
 | `view::dialog::config` | The configuration dialog: kind selections, per-kind fields, validation, forms | `tui` |
-| `view::dialog::details` | The details overlay shared by issues and pull requests: description and comments cards scrolled together, a fixed-width bar of focusable boxes at the right, loading and failure states | `tui` |
+| `view::dialog::details` | The details overlay shared by issues and pull requests: description card and one box per timeline item scrolled together, a fixed-width bar of focusable boxes at the right, loading and failure states | `tui` |
 | `view::dialog::issue` | Maps an issue to overlay content: its seven bar boxes | `tui` |
 | `view::dialog::pull` | Maps a pull request to overlay content: its seven bar boxes, badge and login line helpers | `tui` |
 

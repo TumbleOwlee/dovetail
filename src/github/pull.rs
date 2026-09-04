@@ -1,14 +1,17 @@
-//! One pull request's details and comments.
+//! One pull request's details and timeline.
 
 use serde::{Deserialize, Serialize};
 
 use super::board::Label;
 use super::projects::GithubError;
 use super::pulls::PullState;
+use super::timeline::{self, TimelineItem};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
-const QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number title body state isDraft url author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } } latestReviews(first: 20) { nodes { state author { login } } } assignees(first: 10) { nodes { login } } labels(first: 20) { nodes { name color } } projectItems(first: 10) { nodes { project { title } } } milestone { title } closingIssuesReferences(first: 10) { nodes { number title } } participants(first: 20) { nodes { login } } comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { body createdAt author { login } } } } } }";
+const QUERY_HEAD: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number title body state isDraft url author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } } latestReviews(first: 20) { nodes { state author { login } } } assignees(first: 10) { nodes { login } } labels(first: 20) { nodes { name color } } projectItems(first: 10) { nodes { project { title } } } milestone { title } closingIssuesReferences(first: 10) { nodes { number title } } participants(first: 20) { nodes { login } }";
+
+const QUERY_TAIL: &str = " } } }";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -25,15 +28,6 @@ pub struct Reviewer {
     /// A user login or a team name.
     pub name: String,
     pub state: ReviewState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Comment {
-    /// `None` when the author account was deleted.
-    pub author: Option<String>,
-    /// ISO 8601 as GitHub sends it.
-    pub created_at: String,
-    pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -54,14 +48,14 @@ pub struct PullDetails {
     /// Closing issue references as `#<number> <title>`.
     pub development: Vec<String>,
     pub participants: Vec<String>,
-    pub comments: Vec<Comment>,
+    pub timeline: Vec<TimelineItem>,
 }
 
-/// One page of a details response: the details with this page's comments.
+/// One page of a details response: the details with this page's timeline items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
     pub details: PullDetails,
-    /// Cursor of the next comments page, `None` on the last page.
+    /// Cursor of the next timeline page, `None` on the last page.
     pub next_cursor: Option<String>,
 }
 
@@ -79,10 +73,18 @@ struct Variables<'a> {
     after: Option<&'a str>,
 }
 
+/// The query with the pull request timeline selection in place.
+fn query() -> String {
+    format!(
+        "{QUERY_HEAD} {} {QUERY_TAIL}",
+        timeline::selection(timeline::PULL_ITEM_TYPES)
+    )
+}
+
 /// The JSON body sent to the GraphQL endpoint.
 pub fn request_body(owner: &str, repo: &str, number: u64, after: Option<&str>) -> String {
     serde_json::to_string(&Request {
-        query: QUERY,
+        query: &query(),
         variables: Variables {
             owner,
             name: repo,
@@ -133,7 +135,7 @@ struct Node {
     milestone: Option<Milestone>,
     closing_issues_references: Nodes<IssueRef>,
     participants: Nodes<Author>,
-    comments: Connection,
+    timeline_items: timeline::Connection,
 }
 
 #[derive(Deserialize)]
@@ -194,28 +196,6 @@ struct IssueRef {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Connection {
-    page_info: PageInfo,
-    nodes: Vec<CommentNode>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PageInfo {
-    has_next_page: bool,
-    end_cursor: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CommentNode {
-    body: String,
-    created_at: String,
-    author: Option<Author>,
-}
-
-#[derive(Deserialize)]
 struct Author {
     login: String,
 }
@@ -237,19 +217,8 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
     let node = repository
         .pull_request
         .ok_or(GithubError::MissingPullRequest)?;
-    let next_cursor = Some(node.comments.page_info)
-        .filter(|p| p.has_next_page)
-        .and_then(|p| p.end_cursor);
-    let comments = node
-        .comments
-        .nodes
-        .into_iter()
-        .map(|c| Comment {
-            author: c.author.map(|a| a.login),
-            created_at: c.created_at,
-            body: c.body,
-        })
-        .collect();
+    let next_cursor = node.timeline_items.next_cursor();
+    let timeline = node.timeline_items.items();
     let mut reviewers: Vec<Reviewer> = node
         .review_requests
         .nodes
@@ -307,7 +276,7 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
                 .into_iter()
                 .map(|a| a.login)
                 .collect(),
-            comments,
+            timeline,
         },
         next_cursor,
     })
@@ -337,7 +306,7 @@ pub async fn load_pull_request(
         }
         let page = parse_page(&response.text().await?)?;
         match details.as_mut() {
-            Some(details) => details.comments.extend(page.details.comments),
+            Some(details) => details.timeline.extend(page.details.timeline),
             None => details = Some(page.details),
         }
         cursor = page.next_cursor;
@@ -357,13 +326,13 @@ mod tests {
         "assignees":{"nodes":[{"login":"b"}]},"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},
         "projectItems":{"nodes":[{"project":{"title":"Roadmap"}}]},"milestone":{"title":"v1"},
         "closingIssuesReferences":{"nodes":[{"number":7,"title":"Crash on start"}]},"participants":{"nodes":[{"login":"octo"},{"login":"a"}]},
-        "comments":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[
-        {"body":"LGTM","createdAt":"2026-09-04T10:00:00Z","author":{"login":"a"}},
-        {"body":"gone","createdAt":"2026-09-03T10:00:00Z","author":null}
+        "timelineItems":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[
+        {"__typename":"IssueComment","body":"LGTM","createdAt":"2026-09-04T10:00:00Z","author":{"login":"a"}},
+        {"__typename":"MergedEvent","actor":null,"createdAt":"2026-09-05T10:00:00Z"}
     ]}}}}}"#;
 
     #[test]
-    /// GH-R-015 — the query asks for the pull request by number with its comments page.
+    /// GH-R-015 — the query asks for the pull request by number with its timeline page including merge and review events.
     fn ut_request_body_shape() {
         let body: serde_json::Value =
             serde_json::from_str(&request_body("o", "r", 5, Some("abc"))).expect("json");
@@ -383,16 +352,17 @@ mod tests {
             "milestone { title }",
             "closingIssuesReferences(first: 10) { nodes { number title } }",
             "participants(first: 20) { nodes { login } }",
-            "comments(first: 100, after: $after)",
+            "timelineItems(first: 100, after: $after, itemTypes: [ISSUE_COMMENT, ",
+            "MERGED_EVENT, REVIEW_REQUESTED_EVENT, PULL_REQUEST_REVIEW,",
+            "... on MergedEvent { actor { login } createdAt }",
             "pageInfo { hasNextPage endCursor }",
-            "nodes { body createdAt author { login } }",
         ] {
             assert!(query.contains(part), "{part} missing in {query}");
         }
     }
 
     #[test]
-    /// GH-R-015 — details and comments are carried, deleted authors are `None`, the cursor follows `hasNextPage`.
+    /// GH-R-015, GH-R-017 — details and timeline items are carried, deleted authors are `None`, the cursor follows `hasNextPage`.
     fn ut_parse_page() {
         let page = parse_page(BODY).expect("parses");
         assert_eq!(page.next_cursor.as_deref(), Some("cur"));
@@ -404,21 +374,16 @@ mod tests {
         assert_eq!((d.state, d.draft), (PullState::Open, false));
         assert_eq!(d.url, "https://github.com/o/r/pull/5");
         assert_eq!(d.author.as_deref(), Some("octo"));
+        assert_eq!(d.timeline.len(), 2);
+        assert_eq!(d.timeline[0].actor.as_deref(), Some("a"));
         assert_eq!(
-            d.comments,
-            vec![
-                Comment {
-                    author: Some("a".into()),
-                    created_at: "2026-09-04T10:00:00Z".into(),
-                    body: "LGTM".into()
-                },
-                Comment {
-                    author: None,
-                    created_at: "2026-09-03T10:00:00Z".into(),
-                    body: "gone".into()
-                }
-            ]
+            d.timeline[0].event,
+            timeline::Event::Comment {
+                body: "LGTM".into()
+            }
         );
+        assert_eq!(d.timeline[1].actor, None);
+        assert_eq!(d.timeline[1].event, timeline::Event::Merged);
         let last = BODY.replace(r#""hasNextPage":true"#, r#""hasNextPage":false"#);
         assert_eq!(parse_page(&last).expect("parses").next_cursor, None);
     }

@@ -34,3 +34,4 @@ table rows included. Cite the governing requirement inline.
 **GH-E-005** — Merged or closed pull requests beyond the 10 most recently updated are not listed. Cites GH-R-012.
 **GH-E-006** — Only the first 20 review requests, 20 latest reviews, 10 assignees, 20 labels, 10 projects, 10 closing issues and 20 participants of a pull request are loaded; their pagination is not followed. Cites GH-R-015.
 **GH-E-007** — Only the first 10 projects, 20 sub-issues, 10 closing pull requests and 20 participants of an issue's details are loaded; their pagination is not followed. Cites GH-R-010.
+**GH-E-008** — A timeline item of a type outside GH-R-017, or one whose actor, assignee, reviewer or source is not a user, team, issue or pull request, is skipped rather than failing the load. Cites GH-R-017.
