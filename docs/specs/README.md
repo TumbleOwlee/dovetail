@@ -40,7 +40,9 @@ Anything not listed below, and no `-E` entry outside kind 4, must carry a citing
 
 | Requirement | Enforced by |
 |---|---|
-| *(none yet)* | |
+| TU-R-001 | `AlternateScreen` construction and drop in `main`; a real terminal is needed, so verified by running the binary |
+| TU-R-002 | The panic hook installed in `main`; same |
+| CF-R-002, CF-R-027 | `main` printing and exiting before the alternate screen; the resolution and parse errors themselves are tested under `config` |
 
 **Kind 2 — cross-cutting restatements**
 

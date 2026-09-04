@@ -8,20 +8,18 @@ IDs stable, append-only (CF-E-nnn), numbered independently of the area's `-R-` s
 
 ---
 
-<!--
-Shape of an entry — delete this comment when the first entry lands.
-One physical line per entry, however long — never wrapped (README rule 6),
-table rows included. Cite the governing requirement inline.
-
-## <Boundary group>
+## Resolution boundaries
 
 | ID | Condition | Behavior |
 |---|---|---|
-| **CF-E-001** | <condition> | <observable behavior>; cites CF-R-0nn |
+| **CF-E-001** | `XDG_CONFIG_HOME` is set but empty | The `$HOME/.config` fallback is used; cites CF-R-003 |
+| **CF-E-002** | The repository-level file exists but fails to parse or validate | Load error; the user-level entry is not consulted as a fallback; cites CF-R-005, CF-R-027 |
+| **CF-E-003** | The user-level file exists but fails to parse or validate | Load error even when a repository-level file would have supplied the settings, since the profiles it holds may be needed later; cites CF-R-027 |
+| **CF-E-004** | `[[repo]]` `path` matches the active root only after canonicalization (symlinked checkout) | The entry matches; comparison is on canonical paths; cites CF-R-006 |
 
 ## Known limitations — intentional constraints
 
-**CF-E-002** — <what is deliberately not done>: <why>. Cites CF-R-0nn.
--->
-
-*(Empty.)*
+**CF-E-005** — Rewriting the user-level file drops comments and hand formatting: the file is round-tripped through the schema types, not edited in place. Cites CF-R-028.
+**CF-E-006** — Only the Linux convention is consulted for the user-level path; Windows and macOS locations are not supported. Cites CF-R-003.
+**CF-E-007** — Credential values are stored in plain text in the user-level file; no keyring or encryption. Cites CF-R-010.
+**CF-E-008** — Two distinct checkouts of the same remote never share an entry: matching is by path, never by remote URL. Cites CF-R-006.
