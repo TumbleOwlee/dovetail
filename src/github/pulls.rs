@@ -8,7 +8,7 @@ use super::projects::GithubError;
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
-const QUERY: &str = "query($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { pullRequests(first: 100, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) { pageInfo { hasNextPage endCursor } nodes { number title state isDraft updatedAt headRefName baseRefName author { login } } } } }";
+const QUERY: &str = "query($owner: String!, $name: String!, $states: [PullRequestState!]!, $first: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequests(states: $states, first: $first, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) { pageInfo { hasNextPage endCursor } nodes { number title state isDraft updatedAt headRefName baseRefName author { login } } } } }";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -51,16 +51,36 @@ struct Request<'a> {
 struct Variables<'a> {
     owner: &'a str,
     name: &'a str,
+    states: &'a [&'a str],
+    first: u32,
     after: Option<&'a str>,
 }
 
+/// Which pull requests one request asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listing<'a> {
+    /// One page of the open pull requests, starting after the cursor.
+    Open { after: Option<&'a str> },
+    /// The 10 most recently updated merged or closed pull requests.
+    RecentlyClosed,
+}
+
+/// Merged or closed pull requests listed after the open ones.
+pub const RECENTLY_CLOSED: u32 = 10;
+
 /// The JSON body sent to the GraphQL endpoint.
-pub fn request_body(owner: &str, repo: &str, after: Option<&str>) -> String {
+pub fn request_body(owner: &str, repo: &str, listing: Listing) -> String {
+    let (states, first, after): (&[&str], u32, Option<&str>) = match listing {
+        Listing::Open { after } => (&["OPEN"], 100, after),
+        Listing::RecentlyClosed => (&["MERGED", "CLOSED"], RECENTLY_CLOSED, None),
+    };
     serde_json::to_string(&Request {
         query: QUERY,
         variables: Variables {
             owner,
             name: repo,
+            states,
+            first,
             after,
         },
     })
@@ -172,26 +192,42 @@ pub async fn load_pull_requests(
     let mut pulls = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
-        let response = client
-            .post(ENDPOINT)
-            .bearer_auth(token)
-            .header(reqwest::header::USER_AGENT, "prodgy")
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(request_body(owner, repo, cursor.as_deref()))
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(GithubError::Status(status.as_u16()));
-        }
-        let page = parse_page(&response.text().await?)?;
+        let listing = Listing::Open {
+            after: cursor.as_deref(),
+        };
+        let page = fetch_page(client, token, owner, repo, listing).await?;
         pulls.extend(page.pulls);
         cursor = page.next_cursor;
         if cursor.is_none() {
-            sort_pulls(&mut pulls);
-            return Ok(pulls);
+            break;
         }
     }
+    let closed = fetch_page(client, token, owner, repo, Listing::RecentlyClosed).await?;
+    pulls.extend(closed.pulls);
+    sort_pulls(&mut pulls);
+    Ok(pulls)
+}
+
+async fn fetch_page(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    listing: Listing<'_>,
+) -> Result<Page, GithubError> {
+    let response = client
+        .post(ENDPOINT)
+        .bearer_auth(token)
+        .header(reqwest::header::USER_AGENT, "prodgy")
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(request_body(owner, repo, listing))
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(GithubError::Status(status.as_u16()));
+    }
+    parse_page(&response.text().await?)
 }
 
 #[cfg(test)]
@@ -215,17 +251,31 @@ mod tests {
     }
 
     #[test]
-    /// GH-R-012 — the query asks for the repository's pull requests by update time with a cursor.
+    /// GH-R-012, GH-E-005 — open pull requests are paged 100 at a time by cursor; merged or closed ones are the 10 most recently updated.
     fn ut_request_body_shape() {
-        let body: serde_json::Value =
-            serde_json::from_str(&request_body("o", "r", Some("abc"))).expect("json");
+        let body: serde_json::Value = serde_json::from_str(&request_body(
+            "o",
+            "r",
+            Listing::Open { after: Some("abc") },
+        ))
+        .expect("json");
         assert_eq!(body["variables"]["owner"], "o");
         assert_eq!(body["variables"]["name"], "r");
         assert_eq!(body["variables"]["after"], "abc");
+        assert_eq!(body["variables"]["first"], 100);
+        assert_eq!(body["variables"]["states"], serde_json::json!(["OPEN"]));
+        let closed: serde_json::Value =
+            serde_json::from_str(&request_body("o", "r", Listing::RecentlyClosed)).expect("json");
+        assert_eq!(closed["variables"]["first"], 10);
+        assert_eq!(closed["variables"]["after"], serde_json::Value::Null);
+        assert_eq!(
+            closed["variables"]["states"],
+            serde_json::json!(["MERGED", "CLOSED"])
+        );
         let query = body["query"].as_str().expect("query");
         for part in [
             "repository(owner: $owner, name: $name)",
-            "pullRequests(first: 100, after: $after, orderBy: {field: UPDATED_AT, direction: DESC})",
+            "pullRequests(states: $states, first: $first, after: $after, orderBy: {field: UPDATED_AT, direction: DESC})",
             "pageInfo { hasNextPage endCursor }",
             "number title state isDraft updatedAt headRefName baseRefName author { login }",
         ] {
