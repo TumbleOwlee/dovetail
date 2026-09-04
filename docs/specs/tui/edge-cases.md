@@ -46,6 +46,6 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | ID | Condition | Behavior |
 |---|---|---|
 | **TU-E-016** | The board has no cards | Columns render with their headers and no selection exists; navigation keys do nothing; cites TU-R-054 |
-| **TU-E-017** | A title is wider than the card | It is truncated to the card width; cites TU-R-052 |
+| **TU-E-017** | A single word of a title is wider than the card | It is broken at the card width; cites TU-R-052 |
 | **TU-E-018** | Badges are wider than the card | The badge line is truncated; cites TU-R-052 |
 | **TU-E-019** | The board section is Jira, or credentials are missing | The Task Board tab keeps showing the configuration summary; cites TU-R-050 |

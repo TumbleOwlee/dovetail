@@ -28,7 +28,7 @@ heading text verbatim.
 
 ## Board
 
-**GH-R-004** — The application shall load a project board through the GraphQL API by querying `repositoryOwner(login)`'s `projectV2(number)` for its title, its `Status` single-select field options, and its first 100 items.
+**GH-R-004** — The application shall load a project board through the GraphQL API by querying `repositoryOwner(login)`'s `projectV2(number)` for its title, its `Status` single-select field options, and its items, 100 per page, requesting the next page with the previous page's `endCursor` while `hasNextPage` is true and appending each page's cards to the columns of the first.
 **GH-R-005** — The board's columns shall be the `Status` field's options in the field's order, followed by a `No status` column.
 **GH-R-006** — Each item whose content is an issue shall become a card carrying the issue's title, number, label names with their colors, and assignee logins.
 **GH-R-007** — An item shall be placed in the column named by its `Status` value, or in `No status` when it has none or the name matches no option.

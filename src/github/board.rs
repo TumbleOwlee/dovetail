@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::projects::GithubError;
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
-const QUERY: &str = "query($login: String!, $number: Int!) { repositoryOwner(login: $login) { ... on ProjectV2Owner { projectV2(number: $number) { title field(name: \"Status\") { ... on ProjectV2SingleSelectField { options { name } } } items(first: 100) { nodes { fieldValueByName(name: \"Status\") { ... on ProjectV2ItemFieldSingleSelectValue { name } } content { __typename ... on Issue { title number labels(first: 10) { nodes { name color } } assignees(first: 5) { nodes { login } } } } } } } } } }";
+const QUERY: &str = "query($login: String!, $number: Int!, $after: String) { repositoryOwner(login: $login) { ... on ProjectV2Owner { projectV2(number: $number) { title field(name: \"Status\") { ... on ProjectV2SingleSelectField { options { name } } } items(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { fieldValueByName(name: \"Status\") { ... on ProjectV2ItemFieldSingleSelectValue { name } } content { __typename ... on Issue { title number labels(first: 10) { nodes { name color } } assignees(first: 5) { nodes { login } } } } } } } } } }";
 
 /// A column of the board, named by a `Status` option.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +45,7 @@ struct Request<'a> {
 struct Variables<'a> {
     login: &'a str,
     number: u64,
+    after: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -89,8 +90,18 @@ struct Option_ {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Items {
+    #[serde(default)]
+    page_info: Option<PageInfo>,
     nodes: Vec<Item>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -136,19 +147,37 @@ struct Assignee {
 }
 
 /// The JSON body sent to the GraphQL endpoint.
-pub fn request_body(owner: &str, number: u64) -> String {
+pub fn request_body(owner: &str, number: u64, after: Option<&str>) -> String {
     serde_json::to_string(&Request {
         query: QUERY,
         variables: Variables {
             login: owner,
             number,
+            after,
         },
     })
     .expect("a request of plain values serializes")
 }
 
-/// The board from a GraphQL response body.
-pub fn parse_board(body: &str) -> Result<Board, GithubError> {
+/// One page of a board response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page {
+    pub board: Board,
+    /// Cursor of the next items page, `None` on the last page.
+    pub next_cursor: Option<String>,
+}
+
+impl Board {
+    /// Append `more`'s cards column by column.
+    pub fn extend(&mut self, more: Board) {
+        for (column, extra) in self.columns.iter_mut().zip(more.columns) {
+            column.cards.extend(extra.cards);
+        }
+    }
+}
+
+/// The page from a GraphQL response body.
+pub fn parse_page(body: &str) -> Result<Page, GithubError> {
     let response: Response =
         serde_json::from_str(body).map_err(|e| GithubError::Decode(e.to_string()))?;
     if let Some(first) = response
@@ -176,6 +205,11 @@ pub fn parse_board(body: &str) -> Result<Board, GithubError> {
         cards: Vec::new(),
     });
     let last = columns.len() - 1;
+    let next_cursor = project
+        .items
+        .page_info
+        .filter(|p| p.has_next_page)
+        .and_then(|p| p.end_cursor);
     for item in project.items.nodes {
         let Some(Content::Issue {
             title,
@@ -204,10 +238,19 @@ pub fn parse_board(body: &str) -> Result<Board, GithubError> {
             assignees: assignees.nodes.into_iter().map(|a| a.login).collect(),
         });
     }
-    Ok(Board {
-        title: project.title,
-        columns,
+    Ok(Page {
+        board: Board {
+            title: project.title,
+            columns,
+        },
+        next_cursor,
     })
+}
+
+/// The board from a single-page GraphQL response body.
+#[cfg(test)]
+pub fn parse_board(body: &str) -> Result<Board, GithubError> {
+    parse_page(body).map(|p| p.board)
 }
 
 pub async fn load_board(
@@ -216,19 +259,31 @@ pub async fn load_board(
     owner: &str,
     number: u64,
 ) -> Result<Board, GithubError> {
-    let response = client
-        .post(ENDPOINT)
-        .bearer_auth(token)
-        .header(reqwest::header::USER_AGENT, "prodgy")
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(request_body(owner, number))
-        .send()
-        .await?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(GithubError::Status(status.as_u16()));
+    let mut board: Option<Board> = None;
+    let mut cursor: Option<String> = None;
+    loop {
+        let response = client
+            .post(ENDPOINT)
+            .bearer_auth(token)
+            .header(reqwest::header::USER_AGENT, "prodgy")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(request_body(owner, number, cursor.as_deref()))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(GithubError::Status(status.as_u16()));
+        }
+        let page = parse_page(&response.text().await?)?;
+        match board.as_mut() {
+            Some(board) => board.extend(page.board),
+            None => board = Some(page.board),
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            return Ok(board.expect("the first page was stored above"));
+        }
     }
-    parse_board(&response.text().await?)
 }
 
 #[cfg(test)]
@@ -247,12 +302,14 @@ mod tests {
     #[test]
     /// GH-R-004 — the query asks for the owner's project by number with its Status field and 100 items.
     fn ut_request_body_shape() {
-        let body: serde_json::Value = serde_json::from_str(&request_body("octo", 7)).expect("json");
+        let body: serde_json::Value =
+            serde_json::from_str(&request_body("octo", 7, None)).expect("json");
         let query = body["query"].as_str().expect("query");
         for needle in [
             "projectV2(number: $number)",
             "field(name: \"Status\")",
-            "items(first: 100)",
+            "items(first: 100, after: $after)",
+            "pageInfo { hasNextPage endCursor }",
             "... on Issue",
         ] {
             assert!(query.contains(needle), "{needle} missing in {query}");
@@ -320,5 +377,38 @@ mod tests {
             "{err}"
         );
         assert!(matches!(parse_board("{"), Err(GithubError::Decode(_))));
+    }
+
+    #[test]
+    /// GH-R-004 — the cursor of the previous page is sent as `after`; a page reports its next cursor; pages merge column-wise.
+    fn ut_pages_follow_cursor() {
+        let body: serde_json::Value =
+            serde_json::from_str(&request_body("octo", 7, Some("abc"))).expect("json");
+        assert_eq!(body["variables"]["after"], "abc");
+        let none: serde_json::Value =
+            serde_json::from_str(&request_body("octo", 7, None)).expect("json");
+        assert_eq!(none["variables"]["after"], serde_json::Value::Null);
+
+        let first = BODY.replacen(
+            r#""items":{"nodes":["#,
+            r#""items":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":["#,
+            1,
+        );
+        let page = parse_page(&first).expect("parses");
+        assert_eq!(page.next_cursor.as_deref(), Some("cur"));
+        let last = BODY.replacen(
+            r#""items":{"nodes":["#,
+            r#""items":{"pageInfo":{"hasNextPage":false,"endCursor":"end"},"nodes":["#,
+            1,
+        );
+        let page2 = parse_page(&last).expect("parses");
+        assert_eq!(page2.next_cursor, None);
+        assert_eq!(parse_page(BODY).expect("parses").next_cursor, None);
+
+        let mut board = page.board;
+        board.extend(page2.board);
+        assert_eq!(board.columns[0].cards.len(), 2);
+        let loose: Vec<u64> = board.columns[3].cards.iter().map(|c| c.number).collect();
+        assert_eq!(loose, vec![2, 4, 2, 4]);
     }
 }

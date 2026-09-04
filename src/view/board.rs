@@ -10,9 +10,6 @@ use ratatui::widgets::{Block, Paragraph, Widget};
 
 use crate::github::{Board, Card};
 
-/// Rows one card occupies: border, title, badges, border.
-pub const CARD_HEIGHT: u16 = 4;
-
 pub struct BoardView {
     board: Board,
     /// Column and card index of the selection; `None` when the board has no cards.
@@ -75,27 +72,87 @@ impl BoardView {
         let widths = vec![Constraint::Fill(1); self.board.columns.len()];
         let columns = Layout::horizontal(widths).split(area);
         for (i, (column, rect)) in self.board.columns.iter().zip(columns.iter()).enumerate() {
-            let [header, body] =
-                Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(*rect);
-            Paragraph::new(format!(" {} ({})", column.name, column.cards.len()))
-                .style(Style::default().fg(COLOR_SCHEME.hi).bg(COLOR_SCHEME.bg))
-                .render(header, buf);
-            let visible = (body.height / CARD_HEIGHT) as usize;
+            let block = Block::bordered()
+                .style(Style::default().fg(COLOR_SCHEME.border).bg(COLOR_SCHEME.bg))
+                .title(Span::styled(
+                    format!(" {} ({}) ", column.name, column.cards.len()),
+                    Style::default().fg(COLOR_SCHEME.hi).bg(COLOR_SCHEME.bg),
+                ));
+            let body = block.inner(*rect);
+            block.render(*rect, buf);
             let selected_here = self.selected.filter(|(c, _)| *c == i).map(|(_, card)| card);
-            // Scroll so the selected card is within the visible window.
-            let offset = selected_here.map_or(0, |s| (s + 1).saturating_sub(visible.max(1)));
-            for (n, card) in column.cards.iter().skip(offset).take(visible).enumerate() {
+            let title_width = body.width.saturating_sub(2) as usize;
+            let heights: Vec<u16> = column
+                .cards
+                .iter()
+                .map(|card| card_height(card, title_width))
+                .collect();
+            let offset = scroll_offset(&heights, selected_here, body.height);
+            let mut y = body.y;
+            for (n, card) in column.cards.iter().enumerate().skip(offset) {
+                let height = heights[n];
+                if y + height > body.bottom() {
+                    break;
+                }
                 let rect = Rect {
                     x: body.x,
-                    y: body.y + (n as u16) * CARD_HEIGHT,
+                    y,
                     width: body.width,
-                    height: CARD_HEIGHT,
+                    height,
                 };
-                let highlighted = selected_here == Some(offset + n);
-                render_card(card, rect, buf, highlighted);
+                render_card(card, rect, buf, selected_here == Some(n));
+                y += height;
             }
         }
     }
+}
+
+/// Rows the card takes: border, wrapped title lines, badge line, border.
+fn card_height(card: &Card, title_width: usize) -> u16 {
+    wrap_title(&card.title, title_width).len() as u16 + 3
+}
+
+/// First card index to draw so the selected card ends inside `height` rows.
+fn scroll_offset(heights: &[u16], selected: Option<usize>, height: u16) -> usize {
+    let Some(selected) = selected else {
+        return 0;
+    };
+    let mut offset = 0;
+    while offset < selected && heights[offset..=selected].iter().sum::<u16>() > height {
+        offset += 1;
+    }
+    offset
+}
+
+/// Word-wrap `title` to `width` columns; a word wider than `width` is broken at the width.
+fn wrap_title(title: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0;
+    for word in title.split_whitespace() {
+        let word_len = word.chars().count();
+        if current_len > 0 && current_len + 1 + word_len <= width {
+            current.push(' ');
+            current.push_str(word);
+            current_len += 1 + word_len;
+            continue;
+        }
+        if current_len > 0 {
+            lines.push(std::mem::take(&mut current));
+            current_len = 0;
+        }
+        let chars: Vec<char> = word.chars().collect();
+        for chunk in chars.chunks(width) {
+            if current_len > 0 {
+                lines.push(std::mem::take(&mut current));
+            }
+            current = chunk.iter().collect();
+            current_len = chunk.len();
+        }
+    }
+    lines.push(current);
+    lines
 }
 
 fn render_card(card: &Card, area: Rect, buf: &mut Buffer, highlighted: bool) {
@@ -107,9 +164,14 @@ fn render_card(card: &Card, area: Rect, buf: &mut Buffer, highlighted: bool) {
     let block = Block::bordered().style(border);
     let inner = block.inner(area);
     block.render(area, buf);
-    let [title, badges] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner);
-    Paragraph::new(card.title.as_str())
+    let lines = wrap_title(&card.title, inner.width as usize);
+    let [title, badges] = Layout::vertical([
+        Constraint::Length(lines.len() as u16),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
+    Paragraph::new(text)
         .style(Style::default().fg(COLOR_SCHEME.text).bg(COLOR_SCHEME.bg))
         .render(title, buf);
     let mut spans: Vec<Span> = Vec::new();
@@ -255,34 +317,6 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-051, TU-R-052, TU-R-053 — columns with headers, cards with title and badge lines.
-    fn ut_render_columns_and_cards() {
-        let v = BoardView::new(board());
-        let rows = render_rows(200, 12, |f| v.render(f.area(), f.buffer_mut()));
-        let header = &rows[0];
-        for h in ["Todo (2)", "Doing (0)", "Done (1)", "No status (0)"] {
-            assert!(header.contains(h), "{header}");
-        }
-        assert!(header.find("Todo").expect("todo") < header.find("Done").expect("done"));
-        assert!(
-            rows[2].contains("First") && rows[2].contains("Third"),
-            "{}",
-            rows[2]
-        );
-        assert!(
-            rows[3].contains("bug") && rows[3].contains("@octo"),
-            "{}",
-            rows[3]
-        );
-        assert!(
-            rows[3].contains("docs") && rows[3].contains("@a") && rows[3].contains("@b"),
-            "{}",
-            rows[3]
-        );
-        assert!(rows[6].contains("Second"), "{}", rows[6]);
-    }
-
-    #[test]
     /// TU-R-053 — a label badge sits on its label color with readable text; bad hex has no color.
     fn ut_label_colors() {
         assert_eq!(label_color("d73a4a"), Some(Color::Rgb(0xd7, 0x3a, 0x4a)));
@@ -317,32 +351,76 @@ mod tests {
             v.handle_key(KeyCode::Char('j'));
         }
         assert_eq!(v.selected(), Some((0, 5)));
-        let rows = render_rows(30, 9, |f| v.render(f.area(), f.buffer_mut()));
+        let rows = render_rows(30, 10, |f| v.render(f.area(), f.buffer_mut()));
         let joined = rows.join("\n");
         assert!(joined.contains("Card6"), "{joined}");
         assert!(!joined.contains("Card1"), "{joined}");
     }
 
     #[test]
-    /// TU-E-017, TU-E-018 — long titles and badge lines are truncated to the card width.
-    fn ut_long_content_is_truncated() {
-        let long = "x".repeat(80);
-        let labels: Vec<(&str, &str)> = (0..10).map(|_| ("verylonglabelname", "000000")).collect();
-        let v = BoardView::new(Board {
-            title: "T".into(),
-            columns: vec![column("Todo", vec![card(1, &long, &labels, &[])])],
-        });
-        let rows = render_rows(30, 6, |f| v.render(f.area(), f.buffer_mut()));
+    /// TU-R-051, TU-R-052, TU-R-053 — bordered full-height columns titled with name and count; cards with title and badges.
+    fn ut_render_columns_and_cards() {
+        let v = BoardView::new(board());
+        let rows = render_rows(200, 12, |f| v.render(f.area(), f.buffer_mut()));
+        let header = &rows[0];
+        for h in ["Todo (2)", "Doing (0)", "Done (1)", "No status (0)"] {
+            assert!(header.contains(h), "{header}");
+        }
+        assert!(header.find("Todo").expect("todo") < header.find("Done").expect("done"));
+        assert!(header.starts_with('┌'), "{header}");
         assert!(
-            rows[2].chars().count() <= 30 && rows[2].contains("xxxx"),
+            rows[11].starts_with('└'),
+            "column border spans the full height: {}",
+            rows[11]
+        );
+        assert!(rows[5].contains('│'), "{}", rows[5]);
+        assert!(
+            rows[2].contains("First") && rows[2].contains("Third"),
             "{}",
             rows[2]
         );
-        assert!(rows[3].chars().count() <= 30, "{}", rows[3]);
         assert!(
-            rows[1].starts_with('┏') || rows[1].starts_with('┌') || rows[1].starts_with('╭'),
+            rows[3].contains("bug") && rows[3].contains("@octo"),
             "{}",
-            rows[1]
+            rows[3]
         );
+        assert!(
+            rows[3].contains("docs") && rows[3].contains("@a") && rows[3].contains("@b"),
+            "{}",
+            rows[3]
+        );
+        assert!(rows[6].contains("Second"), "{}", rows[6]);
+    }
+
+    #[test]
+    /// TU-R-052, TU-E-017, TU-E-018 — titles wrap to the card width, a long word breaks, badges truncate.
+    fn ut_titles_wrap_and_badges_truncate() {
+        let labels: Vec<(&str, &str)> = (0..10).map(|_| ("verylonglabelname", "000000")).collect();
+        let v = BoardView::new(Board {
+            title: "T".into(),
+            columns: vec![column(
+                "Todo",
+                vec![
+                    card(1, "a rather long title that needs wrapping", &labels, &[]),
+                    card(2, &"x".repeat(60), &[], &[]),
+                ],
+            )],
+        });
+        let rows = render_rows(30, 16, |f| v.render(f.area(), f.buffer_mut()));
+        assert!(rows.iter().all(|r| r.chars().count() <= 30), "{rows:?}");
+        assert!(rows[2].contains("a rather long title"), "{}", rows[2]);
+        assert!(rows[3].contains("wrapping"), "{}", rows[3]);
+        assert!(rows[4].contains("verylonglabelname"), "{}", rows[4]);
+        assert!(
+            rows[5].contains('└'),
+            "card closes after the badge line: {}",
+            rows[5]
+        );
+        let xs: Vec<&String> = rows.iter().filter(|r| r.contains("xxxxxxxx")).collect();
+        assert!(xs.len() >= 2, "long word broken over lines: {rows:?}");
+        assert_eq!(wrap_title("ab cd", 10), vec!["ab cd"]);
+        assert_eq!(wrap_title("ab cd", 3), vec!["ab", "cd"]);
+        assert_eq!(wrap_title("abcdef", 4), vec!["abcd", "ef"]);
+        assert_eq!(wrap_title("", 4), vec![""]);
     }
 }
