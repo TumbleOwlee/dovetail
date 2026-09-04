@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 
 use crate::github::pull::Comment;
 use crate::view::board::wrap_title;
-use crate::view::theme;
+use crate::view::{notice, theme};
 
 /// Screen cells left free around the overlay on each side.
 const INSET: Margin = Margin::new(4, 3);
@@ -130,12 +130,8 @@ impl DetailsDialog {
         block.render(boxed, buf);
         let number = self.number;
         match &mut self.content {
-            Content::Loading => Paragraph::new(self.loading)
-                .style(theme::base())
-                .render(inner, buf),
-            Content::Failed(message) => Paragraph::new(message.as_str())
-                .style(theme::on_bg(COLOR_SCHEME.error))
-                .render(inner, buf),
+            Content::Loading => notice::render_loading(inner, buf, self.loading),
+            Content::Failed(message) => notice::render_error(inner, buf, message),
             Content::Loaded {
                 content,
                 scroll,
@@ -336,15 +332,43 @@ mod tests {
             rows[2].trim().is_empty() && rows[21].trim().is_empty(),
             "{rows:?}"
         );
+        let at = rows
+            .iter()
+            .position(|r| r.contains("Loading thing.."))
+            .expect("loading box");
         assert!(
-            rows.iter().any(|r| r.contains("Loading thing..")),
+            (10..=13).contains(&at),
+            "box centered in the overlay: {rows:?}"
+        );
+        let chars: Vec<char> = rows[at].chars().collect();
+        let text_at = chars
+            .windows(15)
+            .position(|w| w.iter().collect::<String>() == "Loading thing..")
+            .expect("text");
+        assert_eq!(
+            chars[text_at - 2..text_at],
+            ['│', ' '],
+            "boxed: {}",
+            rows[at]
+        );
+        assert!(
+            rows[at - 1].contains('┌') && rows[at + 1].contains('└'),
             "{rows:?}"
+        );
+        assert!(
+            rows[at - 1].find('┌').expect("corner") > 10,
+            "small box, not the overlay border: {}",
+            rows[at - 1]
         );
         assert!(rows[20].contains('└'), "{}", rows[20]);
         d.set_result(Err::<DetailsContent, _>("github: HTTP 401"));
         let rows = render_rows(80, 24, |f| d.render(f.area(), f.buffer_mut()));
+        let at = rows
+            .iter()
+            .position(|r| r.contains("github: HTTP 401"))
+            .expect("error box");
         assert!(
-            rows.iter().any(|r| r.contains("github: HTTP 401")),
+            rows[at - 1].contains('┌') && rows[at + 1].contains('└'),
             "{rows:?}"
         );
     }
