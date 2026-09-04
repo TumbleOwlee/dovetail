@@ -18,6 +18,9 @@ const INSET: Margin = Margin::new(4, 1);
 /// Space between a card's borders and its text: two columns, one row.
 const CARD_MARGIN: Margin = Margin::new(2, 1);
 
+/// Space between a bar box's borders and its entries: two columns, no rows.
+const BOX_MARGIN: Margin = Margin::new(2, 0);
+
 /// Columns of the bar at the overlay's right.
 const BAR_WIDTH: u16 = 30;
 
@@ -151,6 +154,7 @@ impl DetailsDialog {
 /// A bordered card's text: title line, then its lines.
 struct CardText {
     title: String,
+    margin: Margin,
     lines: Vec<Line<'static>>,
     focused: bool,
 }
@@ -158,7 +162,7 @@ struct CardText {
 impl CardText {
     /// Rows the card takes with its borders and padding.
     fn height(&self) -> u16 {
-        self.lines.len() as u16 + 2 + 2 * CARD_MARGIN.vertical
+        self.lines.len() as u16 + 2 + 2 * self.margin.vertical
     }
 
     fn render(self, area: Rect, buf: &mut Buffer) {
@@ -170,7 +174,7 @@ impl CardText {
         let block = Block::bordered()
             .style(theme::on_bg(color))
             .title(self.title);
-        let inner = block.inner(area).inner(CARD_MARGIN);
+        let inner = block.inner(area).inner(self.margin);
         block.render(area, buf);
         Paragraph::new(self.lines)
             .style(theme::base())
@@ -194,6 +198,7 @@ fn render_bar(boxes: &[SidebarBox], focus: usize, area: Rect, buf: &mut Buffer) 
         }
         let card = CardText {
             title: format!(" {} ", item.title),
+            margin: BOX_MARGIN,
             lines,
             focused: i == focus,
         };
@@ -246,11 +251,13 @@ fn render_cards(
     let cards = [
         CardText {
             title: format!(" #{number} "),
+            margin: CARD_MARGIN,
             lines: description,
             focused: false,
         },
         CardText {
             title: format!(" Comments ({}) ", content.comments.len()),
+            margin: CARD_MARGIN,
             lines: comments,
             focused: false,
         },
@@ -481,19 +488,19 @@ mod tests {
             "{bar:?}"
         );
         assert!(
-            bar[at("Reviewers") + 2].contains("@rev pending"),
+            bar[at("Reviewers") + 1].contains("@rev pending"),
             "{}",
-            bar[at("Reviewers") + 2]
+            bar[at("Reviewers") + 1]
         );
         assert!(
-            bar[at("Assignees") + 2].contains("None"),
+            bar[at("Assignees") + 1].contains("None"),
             "{}",
-            bar[at("Assignees") + 2]
+            bar[at("Assignees") + 1]
         );
         assert!(
-            bar[at("Labels") + 2].contains("bug"),
+            bar[at("Labels") + 1].contains("bug"),
             "{}",
-            bar[at("Labels") + 2]
+            bar[at("Labels") + 1]
         );
         assert!(
             bar[at("Reviewers")].starts_with('┌'),
