@@ -10,16 +10,13 @@ use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 
 use crate::github::pull::Comment;
 use crate::view::board::wrap_title;
-use crate::view::{Padding, theme};
+use crate::view::theme;
 
 /// Screen cells left free around the overlay on each side.
 const INSET: Margin = Margin::new(4, 1);
 
-/// Space between a card's borders and its text.
-const CARD_PADDING: Padding = Padding {
-    vertical: 1,
-    horizontal: 2,
-};
+/// Space between a card's borders and its text: two columns, one row.
+const CARD_MARGIN: Margin = Margin::new(2, 1);
 
 /// Columns of the bar at the overlay's right.
 const BAR_WIDTH: u16 = 30;
@@ -161,7 +158,7 @@ struct CardText {
 impl CardText {
     /// Rows the card takes with its borders and padding.
     fn height(&self) -> u16 {
-        self.lines.len() as u16 + 2 + 2 * CARD_PADDING.vertical
+        self.lines.len() as u16 + 2 + 2 * CARD_MARGIN.vertical
     }
 
     fn render(self, area: Rect, buf: &mut Buffer) {
@@ -173,7 +170,7 @@ impl CardText {
         let block = Block::bordered()
             .style(theme::on_bg(color))
             .title(self.title);
-        let inner = CARD_PADDING.inner(block.inner(area));
+        let inner = block.inner(area).inner(CARD_MARGIN);
         block.render(area, buf);
         Paragraph::new(self.lines)
             .style(theme::base())
@@ -217,7 +214,7 @@ fn render_cards(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let text_width = area.width.saturating_sub(2 + 2 * CARD_PADDING.horizontal) as usize;
+    let text_width = area.width.saturating_sub(2 + 2 * CARD_MARGIN.horizontal) as usize;
     let author = content.author.as_deref().unwrap_or("ghost");
     let mut description: Vec<Line<'static>> = vec![
         Line::styled(content.title.clone(), theme::on_bg(COLOR_SCHEME.text_hi)),

@@ -3,13 +3,13 @@
 use crossterm::event::KeyCode;
 use ferrowl_ui::COLOR_SCHEME;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget};
 
 use crate::github::{Board, Card};
-use crate::view::{Padding, theme};
+use crate::view::theme;
 
 pub struct BoardView {
     board: Board,
@@ -81,7 +81,7 @@ impl BoardView {
             let body = block.inner(*rect);
             block.render(*rect, buf);
             let selected_here = self.selected.filter(|(c, _)| *c == i).map(|(_, card)| card);
-            let title_width = body.width.saturating_sub(2 + 2 * CARD_PADDING.horizontal) as usize;
+            let title_width = body.width.saturating_sub(2 + 2 * CARD_MARGIN.horizontal) as usize;
             let heights: Vec<u16> = column
                 .cards
                 .iter()
@@ -113,17 +113,14 @@ pub fn render_loading(area: Rect, buf: &mut Buffer) {
 }
 
 /// Space between a card's border and its title and badges.
-const CARD_PADDING: Padding = Padding {
-    vertical: 1,
-    horizontal: 2,
-};
+const CARD_MARGIN: Margin = Margin::new(2, 1);
 
 /// Rows the card takes: border, margin, wrapped title lines, badge rows, margin, border.
 fn card_height(card: &Card, title_width: usize) -> u16 {
     wrap_title(&card.title, title_width).len() as u16
         + badge_rows(card)
         + 2
-        + 2 * CARD_PADDING.vertical
+        + 2 * CARD_MARGIN.vertical
 }
 
 /// Rows below the title: an empty line and the badge line, only when the card has labels.
@@ -196,7 +193,7 @@ fn render_card(card: &Card, area: Rect, buf: &mut Buffer, highlighted: bool) {
         .style(border)
         .title_top(Line::from(format!("#{}", card.number)).left_aligned())
         .title_top(Line::from(assignees).right_aligned());
-    let inner = CARD_PADDING.inner(block.inner(area));
+    let inner = block.inner(area).inner(CARD_MARGIN);
     block.render(area, buf);
     let lines = wrap_title(&card.title, inner.width as usize);
     let [title, _gap, badges] = Layout::vertical([
