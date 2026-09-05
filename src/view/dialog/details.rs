@@ -10,6 +10,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, StatefulWidget, Widget};
 
+use crate::github::blob::Blob;
 use crate::github::board::Label;
 use crate::github::files::ChangedFile;
 use crate::github::pull::{Commit, ReviewState};
@@ -65,7 +66,37 @@ pub enum Panes {
     Pull {
         commits: Vec<Commit>,
         files: Vec<ChangedFile>,
+        owner: String,
+        repo: String,
+        /// The head commit whose blobs the `Files Changed` tab shows.
+        head_oid: String,
     },
+}
+
+/// A file's content to request: the path at the head commit of a repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobRef {
+    pub owner: String,
+    pub repo: String,
+    pub oid: String,
+    pub path: String,
+}
+
+fn blob_ref(panes: &Panes, path: String) -> Option<BlobRef> {
+    match panes {
+        Panes::Conversation => None,
+        Panes::Pull {
+            owner,
+            repo,
+            head_oid,
+            ..
+        } => Some(BlobRef {
+            owner: owner.clone(),
+            repo: repo.clone(),
+            oid: head_oid.clone(),
+            path,
+        }),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +157,8 @@ pub enum DetailsEvent {
     Close,
     /// The caller closes this overlay and opens the link.
     Open(Link),
+    /// The caller queues the request for this file's content.
+    Fetch(BlobRef),
 }
 
 enum Content {
@@ -142,7 +175,7 @@ enum Content {
         /// Ctrl+T was pressed; the next key selects a tab.
         prefix: bool,
         commits: Box<CommitsView>,
-        files: FilesState,
+        files: Box<FilesState>,
     },
 }
 
@@ -164,18 +197,19 @@ impl DetailsDialog {
         }
     }
 
-    /// Replaces the loading state with the content or the failure.
-    pub fn set_result(&mut self, result: Result<DetailsContent, impl ToString>) {
+    /// Replaces the loading state with the content or the failure; a pull request's first
+    /// changed file is returned for its content to be requested.
+    pub fn set_result(&mut self, result: Result<DetailsContent, impl ToString>) -> Option<BlobRef> {
         self.content = match result {
             Ok(content) => Content::Loaded {
                 commits: Box::new(CommitsView::new(match &content.panes {
                     Panes::Conversation => &[],
                     Panes::Pull { commits, .. } => commits,
                 })),
-                files: FilesState::new(match &content.panes {
+                files: Box::new(FilesState::new(match &content.panes {
                     Panes::Conversation => &[],
                     Panes::Pull { files, .. } => files,
-                }),
+                })),
                 content: Box::new(content),
                 scroll: 0,
                 focus: 0,
@@ -185,6 +219,29 @@ impl DetailsDialog {
             },
             Err(e) => Content::Failed(e.to_string()),
         };
+        self.take_request()
+    }
+
+    /// Stores a file's content and returns the next file whose content is needed, if any.
+    pub fn handle_blob(
+        &mut self,
+        path: &str,
+        result: Result<Blob, impl ToString>,
+    ) -> Option<BlobRef> {
+        if let Content::Loaded { content, files, .. } = &mut self.content
+            && let Panes::Pull { files: changed, .. } = &content.panes
+        {
+            files.handle_blob(changed, path, result);
+        }
+        self.take_request()
+    }
+
+    fn take_request(&mut self) -> Option<BlobRef> {
+        let Content::Loaded { content, files, .. } = &mut self.content else {
+            return None;
+        };
+        let path = files.take_request()?;
+        blob_ref(&content.panes, path)
     }
 
     pub fn handle_key(&mut self, modifiers: KeyModifiers, code: KeyCode) -> DetailsEvent {
@@ -237,8 +294,14 @@ impl DetailsDialog {
                 return DetailsEvent::Consumed;
             }
             DetailsTab::Files => {
-                files.handle_key(changed, code);
-                return DetailsEvent::Consumed;
+                files.handle_key(changed, modifiers, code);
+                return match files
+                    .take_request()
+                    .and_then(|p| blob_ref(&content.panes, p))
+                {
+                    Some(blob) => DetailsEvent::Fetch(blob),
+                    None => DetailsEvent::Consumed,
+                };
             }
         }
         let boxes = content.boxes.len().max(1);
@@ -918,6 +981,9 @@ mod tests {
                 deletions: 0,
                 patch: Some("@@ -1 +1,2 @@\n a\n+b\n".into()),
             }],
+            owner: "o".into(),
+            repo: "r".into(),
+            head_oid: "abc".into(),
         };
         d.set_result(Ok::<_, String>(c));
         let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
@@ -954,8 +1020,19 @@ mod tests {
             "{rows:?}"
         );
         assert!(
-            rows.iter().any(|r| r.matches("   1 a").count() == 2)
-                && rows.iter().any(|r| r.contains("   2 b")),
+            rows.iter()
+                .any(|r| r.matches("Loading file..").count() == 2),
+            "{rows:?}"
+        );
+        assert_eq!(
+            d.handle_blob("src/main.rs", Ok::<_, String>(Blob::Text("a\nb\n".into()))),
+            None,
+            "nothing else to request"
+        );
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            rows.iter().any(|r| r.matches("1  a").count() == 2)
+                && rows.iter().any(|r| r.contains("2 +b")),
             "{rows:?}"
         );
         d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
@@ -1023,6 +1100,9 @@ mod tests {
                 })
                 .collect(),
             files: vec![],
+            owner: "o".into(),
+            repo: "r".into(),
+            head_oid: "abc".into(),
         };
         d.set_result(Ok::<_, String>(c));
         d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));

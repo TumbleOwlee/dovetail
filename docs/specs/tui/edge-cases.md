@@ -60,7 +60,13 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-028** | A timeline item's actor account was deleted | The title shows `@ghost`; cites TU-R-066 |
 | **TU-E-029** | Enter in a details overlay with the focus outside `Development`, or on an empty `Development` box | Nothing happens; the overlay stays open; cites TU-R-071 |
 | **TU-E-030** | Enter on a `Development` entry while the target tab's list is unavailable, loading or failed | The tab switches and the overlay opens anyway; the list underneath keeps its state; cites TU-R-071 |
-| **TU-E-031** | The selected changed file has no patch | Both diff sides read `No diff available` in the placeholder color; cites TU-R-074 |
-| **TU-E-032** | A patch holds a hunk header without parseable line starts, or a line with no `+`, `-`, space or `\\` prefix | The header is shown verbatim and numbering restarts at 1; the line is shown as context; a truncated patch never fails to render; cites TU-R-074 |
+| **TU-E-031** | The selected changed file has no patch | Both diff sides read `No diff available` in the placeholder color; no content is requested; cites TU-R-074, TU-R-076 |
+| **TU-E-032** | A patch holds a hunk header without parseable line starts, or a line with no `+`, `-`, space or `\\` prefix | The hunk is applied where the previous one ended; the line is shown as context; a truncated patch never fails to render; cites TU-R-074 |
 | **TU-E-033** | The pull request has no changed files | The tree reads `None`; both diff sides are empty; `j`, `k` and Tab do nothing harmful; cites TU-R-074 |
 | **TU-E-034** | Ctrl+T in the issue details overlay, or a digit beyond the last overlay tab after Ctrl+T | Consumed without effect; cites TU-R-072 |
+| **TU-E-035** | The selected file is binary at the head commit | Both diff sides read `Binary file` in the placeholder color; the file stays in the tree; cites TU-R-074 |
+| **TU-E-036** | The selected file's content is too large for the API to return as text | Both diff sides read `File too large` in the placeholder color; the file stays in the tree; cites TU-R-074 |
+| **TU-E-037** | The selected file was removed | The old side lists the patch's removed lines, the new side only blank rows; cites TU-R-074, TU-R-076 |
+| **TU-E-038** | The head content holds fewer lines than the patch addresses | The patch's own text stands in for the missing lines; never a crash; cites TU-R-074 |
+| **TU-E-039** | A file's content arrives after the overlay was closed, or for a path not in the tree | Discarded; cites TU-R-076 |
+| **TU-E-040** | Focus moves to a diff side while it shows a notice instead of a file | The side's border still shows the focus; navigation keys do nothing; cites TU-R-075 |

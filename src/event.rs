@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::app::{App, FetchRequest};
 use crate::atlassian::{self, AtlassianError, JiraProject};
+use crate::github::blob::Blob;
 use crate::github::issue::Issue;
 use crate::github::pull::PullDetails;
 use crate::github::pulls::PullRequest;
@@ -20,6 +21,11 @@ pub enum Message {
     Issue(Result<Issue, GithubError>),
     PullRequests(Result<Vec<PullRequest>, GithubError>),
     PullRequest(Result<PullDetails, GithubError>),
+    /// A file's content at a commit, for the open pull request overlay.
+    Blob {
+        path: String,
+        result: Result<Blob, GithubError>,
+    },
 }
 
 /// Performs one fetch and sends its outcome; a dropped receiver ends it silently.
@@ -54,6 +60,16 @@ pub async fn dispatch(request: FetchRequest, client: reqwest::Client, tx: mpsc::
         } => Message::PullRequest(
             github::pull::load_pull_request(&client, &token, &owner, &repo, number).await,
         ),
+        FetchRequest::Blob {
+            token,
+            owner,
+            repo,
+            oid,
+            path,
+        } => Message::Blob {
+            result: github::blob::load_blob(&client, &token, &owner, &repo, &oid, &path).await,
+            path,
+        },
     };
     let _ = tx.send(message).await;
 }

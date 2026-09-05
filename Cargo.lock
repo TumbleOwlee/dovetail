@@ -1599,6 +1599,7 @@ dependencies = [
  "clap",
  "crossterm",
  "derive_builder",
+ "ferrowl-syntax",
  "ferrowl-ui",
  "getset",
  "itertools 0.15.0",

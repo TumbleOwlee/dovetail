@@ -1,16 +1,27 @@
-//! The `Files Changed` tab of the pull request overlay: file tree and split diff.
+//! The `Files Changed` tab of the pull request overlay: file tree and the selected file's old
+//! and new state side by side.
 
-use crossterm::event::KeyCode;
+use std::collections::HashMap;
+
+use crossterm::event::{KeyCode, KeyModifiers};
+use ferrowl_syntax::Language;
+use ferrowl_ui::Border;
+use ferrowl_ui::state::{CodeInputFieldState, CodeInputFieldStateBuilder};
+use ferrowl_ui::style::SyntaxThemeBuilder;
+use ferrowl_ui::traits::{HandleEvents, SetFocus};
+use ferrowl_ui::widgets::{CodeInputField, CodeInputFieldBuilder};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Widget};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Paragraph, StatefulWidget, Widget};
 
-use crate::diff::{self, Kind, Row};
+use crate::diff::{self, Cell};
+use crate::github::blob::Blob;
 use crate::github::files::{ChangedFile, FileStatus};
 use crate::view::theme;
 
 const TREE_WIDTH: u16 = 30;
+const LOADING: &str = "Loading file..";
 
 /// The focusable panels, in Tab order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,26 +69,54 @@ pub fn tree_rows(files: &[ChangedFile]) -> Vec<TreeRow> {
     rows
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What is known about a file's content at the head commit.
+enum Loaded {
+    Loading,
+    Failed(String),
+    Blob(Blob),
+}
+
+/// What the two diff panels show for the selected file.
+enum Sides {
+    /// No file is selected.
+    Empty,
+    /// The same one-line notice on both sides.
+    Notice {
+        text: String,
+        error: bool,
+    },
+    Fields(Box<Fields>),
+}
+
+struct Fields {
+    old: CodeInputFieldState,
+    new: CodeInputFieldState,
+}
+
 pub struct FilesState {
     /// Index into the files of the selected one.
     selected: usize,
     focus: Panel,
-    scroll: usize,
-    /// The split rows of the selected file's patch.
-    rows: Vec<Row>,
+    /// Content by path, entered when its request is queued.
+    blobs: HashMap<String, Loaded>,
+    sides: Sides,
+    /// A path whose content the caller has yet to request.
+    request: Option<String>,
 }
 
 impl FilesState {
-    /// The first file selected, the tree focused.
+    /// The first file selected, the tree focused, that file's content requested.
     pub fn new(files: &[ChangedFile]) -> FilesState {
         let selected = tree_rows(files).iter().find_map(|r| r.file).unwrap_or(0);
-        FilesState {
+        let mut state = FilesState {
             selected,
             focus: Panel::Tree,
-            scroll: 0,
-            rows: rows_of(files.get(selected)),
-        }
+            blobs: HashMap::new(),
+            sides: Sides::Empty,
+            request: None,
+        };
+        state.refresh(files);
+        state
     }
 
     #[cfg(test)]
@@ -90,21 +129,55 @@ impl FilesState {
         self.selected
     }
 
-    pub fn handle_key(&mut self, files: &[ChangedFile], code: KeyCode) {
+    /// The active lines of the old and the new side, when both show a file.
+    #[cfg(test)]
+    pub fn active_lines(&self) -> Option<(usize, usize)> {
+        match &self.sides {
+            Sides::Fields(f) => Some((f.old.active_line(), f.new.active_line())),
+            _ => None,
+        }
+    }
+
+    /// The path whose content the caller must request, once.
+    pub fn take_request(&mut self) -> Option<String> {
+        self.request.take()
+    }
+
+    /// Stores the content that arrived for `path`; ignored for a path not among the files.
+    pub fn handle_blob(
+        &mut self,
+        files: &[ChangedFile],
+        path: &str,
+        result: Result<Blob, impl ToString>,
+    ) {
+        if !files.iter().any(|f| f.path == path) {
+            return;
+        }
+        let loaded = match result {
+            Ok(blob) => Loaded::Blob(blob),
+            Err(e) => Loaded::Failed(e.to_string()),
+        };
+        self.blobs.insert(path.to_string(), loaded);
+        if files.get(self.selected).is_some_and(|f| f.path == path) {
+            self.refresh(files);
+        }
+    }
+
+    pub fn handle_key(&mut self, files: &[ChangedFile], modifiers: KeyModifiers, code: KeyCode) {
         match (code, self.focus) {
             (KeyCode::Tab, _) => {
-                self.focus = match self.focus {
+                self.set_focus(match self.focus {
                     Panel::Tree => Panel::Old,
                     Panel::Old => Panel::New,
                     Panel::New => Panel::Tree,
-                }
+                });
             }
             (KeyCode::BackTab, _) => {
-                self.focus = match self.focus {
+                self.set_focus(match self.focus {
                     Panel::Tree => Panel::New,
                     Panel::Old => Panel::Tree,
                     Panel::New => Panel::Old,
-                }
+                });
             }
             (KeyCode::Char('j' | 'k'), Panel::Tree) => {
                 let order: Vec<usize> = tree_rows(files).iter().filter_map(|r| r.file).collect();
@@ -118,22 +191,83 @@ impl FilesState {
                 };
                 if order[at] != self.selected {
                     self.selected = order[at];
-                    self.scroll = 0;
-                    self.rows = rows_of(files.get(self.selected));
+                    self.refresh(files);
                 }
             }
-            (KeyCode::Char('j'), _) => {
-                self.scroll = (self.scroll + 1).min(self.rows.len().saturating_sub(1));
+            (_, Panel::Old | Panel::New) => {
+                let Sides::Fields(fields) = &mut self.sides else {
+                    return;
+                };
+                let Fields { old, new } = fields.as_mut();
+                let code = match code {
+                    KeyCode::Char('j') => KeyCode::Down,
+                    KeyCode::Char('k') => KeyCode::Up,
+                    other => other,
+                };
+                let (focused, other) = if self.focus == Panel::Old {
+                    (old, new)
+                } else {
+                    (new, old)
+                };
+                focused.handle_events(modifiers, code);
+                other.set_active_line(focused.active_line());
+                other.set_cursor_col(0);
             }
-            (KeyCode::Char('k'), _) => self.scroll = self.scroll.saturating_sub(1),
             _ => {}
         }
     }
 
-    pub fn render(&self, files: &[ChangedFile], area: Rect, buf: &mut Buffer) {
+    fn set_focus(&mut self, focus: Panel) {
+        self.focus = focus;
+        if let Sides::Fields(f) = &mut self.sides {
+            f.old.set_focused(focus == Panel::Old);
+            f.new.set_focused(focus == Panel::New);
+        }
+    }
+
+    /// Rebuilds the diff sides for the selected file, queueing its content request the first time.
+    fn refresh(&mut self, files: &[ChangedFile]) {
+        let Some(file) = files.get(self.selected) else {
+            self.sides = Sides::Empty;
+            return;
+        };
+        let notice = |text: &str, error: bool| Sides::Notice {
+            text: text.to_string(),
+            error,
+        };
+        let Some(patch) = file.patch.as_deref() else {
+            self.sides = notice("No diff available", false);
+            return;
+        };
+        if file.status == FileStatus::Removed {
+            self.sides = self.fields(diff::split_file("", patch));
+            return;
+        }
+        self.sides = match self.blobs.get(&file.path) {
+            None => {
+                self.blobs.insert(file.path.clone(), Loaded::Loading);
+                self.request = Some(file.path.clone());
+                notice(LOADING, false)
+            }
+            Some(Loaded::Loading) => notice(LOADING, false),
+            Some(Loaded::Failed(message)) => notice(message, true),
+            Some(Loaded::Blob(Blob::Binary)) => notice("Binary file", false),
+            Some(Loaded::Blob(Blob::TooLarge)) => notice("File too large", false),
+            Some(Loaded::Blob(Blob::Text(text))) => self.fields(diff::split_file(text, patch)),
+        };
+    }
+
+    fn fields(&self, split: diff::Split) -> Sides {
+        Sides::Fields(Box::new(Fields {
+            old: field(&split.old, self.focus == Panel::Old),
+            new: field(&split.new, self.focus == Panel::New),
+        }))
+    }
+
+    pub fn render(&mut self, files: &[ChangedFile], area: Rect, buf: &mut Buffer) {
         let [tree, diff] =
             Layout::horizontal([Constraint::Length(TREE_WIDTH), Constraint::Min(0)]).areas(area);
-        let [old, new] =
+        let [old_area, new_area] =
             Layout::horizontal([Constraint::Percentage(50), Constraint::Min(0)]).areas(diff);
         self.render_tree(files, tree, buf);
         let selected = files.get(self.selected);
@@ -141,8 +275,47 @@ impl FilesState {
             f.previous_path.clone().unwrap_or_else(|| f.path.clone())
         });
         let new_title = selected.map_or(String::new(), |f| f.path.clone());
-        self.render_side(selected, Panel::Old, &old_title, old, buf);
-        self.render_side(selected, Panel::New, &new_title, new, buf);
+        match &mut self.sides {
+            Sides::Empty => {
+                self.panel(Panel::Old, &old_title).render(old_area, buf);
+                self.panel(Panel::New, &new_title).render(new_area, buf);
+            }
+            Sides::Notice { text, error } => {
+                let color = if *error {
+                    theme::TEMPLATE.error
+                } else {
+                    theme::TEMPLATE.placeholder
+                };
+                let line = Line::styled(text.clone(), theme::on_bg(color));
+                for (panel, title, area) in [
+                    (Panel::Old, &old_title, old_area),
+                    (Panel::New, &new_title, new_area),
+                ] {
+                    let block = self.panel(panel, title);
+                    let inner = block.inner(area).inner(Margin::new(1, 0));
+                    block.render(area, buf);
+                    Paragraph::new(line.clone())
+                        .style(theme::base())
+                        .render(inner, buf);
+                }
+            }
+            Sides::Fields(fields) => {
+                let Fields { old, new } = fields.as_mut();
+                let old_widget = code_field(&old_title);
+                let new_widget = code_field(&new_title);
+                // The focused side settles its scroll while rendering; the other side then
+                // mirrors it so the same row faces on both sides.
+                if self.focus == Panel::New {
+                    StatefulWidget::render(&new_widget, new_area, buf, new);
+                    mirror(new, old);
+                    StatefulWidget::render(&old_widget, old_area, buf, old);
+                } else {
+                    StatefulWidget::render(&old_widget, old_area, buf, old);
+                    mirror(old, new);
+                    StatefulWidget::render(&new_widget, new_area, buf, new);
+                }
+            }
+        }
     }
 
     fn panel(&self, panel: Panel, title: &str) -> Block<'static> {
@@ -199,67 +372,59 @@ impl FilesState {
             .style(theme::base())
             .render(inner, buf);
     }
-
-    fn render_side(
-        &self,
-        file: Option<&ChangedFile>,
-        panel: Panel,
-        title: &str,
-        area: Rect,
-        buf: &mut Buffer,
-    ) {
-        let block = self.panel(panel, title);
-        let inner = block.inner(area).inner(Margin::new(1, 0));
-        block.render(area, buf);
-        let placeholder = theme::on_bg(theme::TEMPLATE.placeholder);
-        let lines: Vec<Line<'static>> = match file {
-            None => Vec::new(),
-            Some(f) if f.patch.is_none() => vec![Line::styled("No diff available", placeholder)],
-            Some(_) => self
-                .rows
-                .iter()
-                .skip(self.scroll)
-                .take(inner.height as usize)
-                .map(|row| match row {
-                    Row::Hunk(header) => Line::styled(header.clone(), placeholder),
-                    Row::Lines { left, right } => {
-                        let side = if panel == Panel::Old { left } else { right };
-                        match side {
-                            None => Line::raw(""),
-                            Some(s) => {
-                                let color = match s.kind {
-                                    Kind::Context => theme::TEMPLATE.text,
-                                    Kind::Removed => theme::TEMPLATE.error,
-                                    Kind::Added => theme::TEMPLATE.success,
-                                };
-                                Line::from(vec![
-                                    Span::styled(format!("{:>4} ", s.number), placeholder),
-                                    Span::styled(s.text.clone(), theme::on_bg(color)),
-                                ])
-                            }
-                        }
-                    }
-                })
-                .collect(),
-        };
-        Paragraph::new(lines)
-            .style(theme::base())
-            .render(inner, buf);
-    }
 }
 
-/// The split rows of a file's patch, none without a file or a patch.
-fn rows_of(file: Option<&ChangedFile>) -> Vec<Row> {
-    file.and_then(|f| f.patch.as_deref())
-        .map(diff::split_rows)
-        .unwrap_or_default()
+/// A read-only diff field holding the cells, the active line at the top.
+fn field(cells: &[Cell], focused: bool) -> CodeInputFieldState {
+    let labels: Vec<String> = if cells.is_empty() {
+        vec![String::new()]
+    } else {
+        cells
+            .iter()
+            .map(|c| c.number.map_or_else(String::new, |n| n.to_string()))
+            .collect()
+    };
+    let text: Vec<&str> = cells.iter().map(|c| c.text.as_str()).collect();
+    let mut state = CodeInputFieldStateBuilder::default()
+        .vim(false)
+        .disabled(true)
+        .focused(focused)
+        .language(Some(Language::Diff))
+        .gutter_labels(Some(labels))
+        .build()
+        .expect("CodeInputFieldState fields all default");
+    state.set_content(&text.join("\n"));
+    state.set_active_line(0);
+    state.set_cursor_col(0);
+    state
+}
+
+fn code_field(title: &str) -> CodeInputField {
+    let theme = SyntaxThemeBuilder::default()
+        .added(theme::on_bg(theme::TEMPLATE.success))
+        .removed(theme::on_bg(theme::TEMPLATE.error))
+        .meta(theme::on_bg(theme::TEMPLATE.placeholder))
+        .build()
+        .expect("SyntaxTheme fields all default");
+    CodeInputFieldBuilder::default()
+        .border(Border::Full(Margin::new(1, 0)))
+        .title(Some(title.into()))
+        .style(theme::input_field_style())
+        .syntax_theme(theme)
+        .build()
+        .expect("CodeInputField fields all default")
+}
+
+fn mirror(from: &CodeInputFieldState, to: &mut CodeInputFieldState) {
+    to.set_active_line(from.active_line());
+    to.set_scroll_offset(from.scroll_offset());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::github::files::FileStatus;
-    use crate::testkit::render_buffer;
+    use crate::testkit::{buffer_rows, render_buffer};
     use crate::view::theme;
 
     fn file(path: &str, status: FileStatus, patch: Option<&str>) -> ChangedFile {
@@ -278,7 +443,7 @@ mod tests {
             file(
                 "src/main.rs",
                 FileStatus::Modified,
-                Some("@@ -1,2 +1,2 @@\n fn main() {\n-    old();\n+    new();\n"),
+                Some("@@ -1,3 +1,3 @@\n fn main() {\n-    old();\n+    new();\n }\n"),
             ),
             file(
                 "README.md",
@@ -297,26 +462,27 @@ mod tests {
         ]
     }
 
-    fn rows(buf: &Buffer) -> Vec<String> {
-        (0..buf.area.height)
-            .map(|y| {
-                (0..buf.area.width)
-                    .map(|x| buf[(x, y)].symbol())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
-            })
-            .collect()
+    fn draw(s: &mut FilesState, files: &[ChangedFile], height: u16) -> (Vec<String>, Buffer) {
+        let buf = render_buffer(100, height, |f| s.render(files, f.area(), f.buffer_mut()));
+        (buffer_rows(&buf), buf)
     }
 
     /// The first cell below the title row where `text` starts.
     fn cell(buf: &Buffer, text: &str) -> (u16, u16) {
-        for (y, row) in rows(buf).iter().enumerate().skip(1) {
+        for (y, row) in buffer_rows(buf).iter().enumerate().skip(1) {
             if let Some(x) = row.find(text) {
                 return (row[..x].chars().count() as u16, y as u16);
             }
         }
         panic!("{text} not drawn");
+    }
+
+    fn count(rows: &[String], text: &str) -> usize {
+        rows.iter().map(|r| r.matches(text).count()).sum()
+    }
+
+    fn text(content: &str) -> Result<Blob, String> {
+        Ok(Blob::Text(content.into()))
     }
 
     #[test]
@@ -343,24 +509,23 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-074, TU-R-075 — three titled panels, the tree focused and its first file selected; j/k move over files only and show that file's diff; Tab cycles the focus; j/k on a diff side scroll both, clamped.
+    /// TU-R-074, TU-R-075, TU-R-076, TU-E-031, TU-E-037 — three titled panels, the tree focused and its first file selected and requested; the sides read `Loading file..` until the content arrives, then show the whole file with markers, gutter numbers, colors and filler rows; j/k move over files only, requesting each once; a file without a patch reads `No diff available` and a removed file needs no request; Tab cycles the focus.
     fn ut_keys_and_panels() {
         let files = files();
         let mut s = FilesState::new(&files);
         assert_eq!((s.focus(), s.selected()), (Panel::Tree, 1));
-        let buf = render_buffer(100, 12, |f| s.render(&files, f.area(), f.buffer_mut()));
-        let lines = rows(&buf);
+        assert_eq!(s.take_request().as_deref(), Some("README.md"));
+        assert_eq!(s.take_request(), None, "requested once");
+        let (rows, buf) = draw(&mut s, &files, 12);
         assert!(
-            lines[0].contains(" Files ")
-                && lines[0].contains(" README.md ")
-                && lines[0].matches(" README.md ").count() == 2,
-            "{lines:?}"
+            rows[0].contains(" Files ") && rows[0].matches(" README.md ").count() == 2,
+            "{rows:?}"
         );
         assert!(
-            lines[1].contains("README.md")
-                && lines[2].contains("docs/")
-                && lines[3].contains("  new.md"),
-            "{lines:?}"
+            rows[1].contains("README.md")
+                && rows[2].contains("docs/")
+                && rows[3].contains("  new.md"),
+            "{rows:?}"
         );
         let (x, y) = cell(&buf, "README.md");
         assert_eq!(buf[(x, y)].bg, theme::TEMPLATE.hi_bg, "selected file");
@@ -368,95 +533,201 @@ mod tests {
         let (x, y) = cell(&buf, "a.rs");
         assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.error, "removed file");
         assert_eq!(buf[(0, 0)].fg, theme::TEMPLATE.hi, "tree border focused");
-        assert!(lines[1].contains("@@ -0,0 +1 @@"), "{lines:?}");
-        assert!(lines[2].contains("   1 # Title"), "{lines:?}");
-        let (x, y) = cell(&buf, "# Title");
+        assert_eq!(count(&rows, LOADING), 2, "{rows:?}");
+        let (x, y) = cell(&buf, LOADING);
+        assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.placeholder);
+
+        s.handle_blob(&files, "README.md", text("# Title\n"));
+        let (rows, buf) = draw(&mut s, &files, 12);
+        assert_eq!(count(&rows, "1 +# Title"), 1, "{rows:?}");
+        let (x, y) = cell(&buf, "+# Title");
         assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.success);
-        s.handle_key(&files, KeyCode::Char('j'));
+        let old_inner = &rows[y as usize][TREE_WIDTH as usize..65];
+        assert!(
+            old_inner.trim_matches(['│', ' ']).is_empty(),
+            "filler row blank: {old_inner:?}"
+        );
+
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
         assert_eq!(s.selected(), 2, "skips the directory line");
-        let buf = render_buffer(100, 12, |f| s.render(&files, f.area(), f.buffer_mut()));
-        let lines = rows(&buf);
+        assert_eq!(s.take_request(), None);
+        let (rows, _) = draw(&mut s, &files, 12);
         assert!(
-            lines[0].contains(" docs/old.md ") && lines[0].contains(" docs/new.md "),
-            "{lines:?}"
+            rows[0].contains(" docs/old.md ") && rows[0].contains(" docs/new.md "),
+            "{rows:?}"
         );
-        assert_eq!(
-            lines
-                .iter()
-                .map(|l| l.matches("No diff available").count())
-                .sum::<usize>(),
-            2,
-            "{lines:?}"
-        );
-        s.handle_key(&files, KeyCode::Char('j'));
+        assert_eq!(count(&rows, "No diff available"), 2, "{rows:?}");
+
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
         assert_eq!(s.selected(), 0);
-        let buf = render_buffer(100, 12, |f| s.render(&files, f.area(), f.buffer_mut()));
-        let lines = rows(&buf);
+        assert_eq!(s.take_request().as_deref(), Some("src/main.rs"));
+        s.handle_blob(&files, "src/main.rs", text("fn main() {\n    new();\n}\n"));
+        let (rows, buf) = draw(&mut s, &files, 12);
+        assert_eq!(count(&rows, "1  fn main() {"), 2, "{rows:?}");
         assert!(
-            lines[2].contains("   1 fn main() {") && lines[2].matches("fn main() {").count() == 2,
-            "{lines:?}"
+            rows.iter()
+                .any(|r| r.contains("2 -    old();") && r.contains("2 +    new();")),
+            "{rows:?}"
         );
-        assert!(
-            lines[3].contains("   2     old();") && lines[3].contains("   2     new();"),
-            "{lines:?}"
-        );
-        let (x, y) = cell(&buf, "old();");
+        assert_eq!(count(&rows, "3  }"), 2, "{rows:?}");
+        let (x, y) = cell(&buf, "-    old();");
         assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.error);
-        let (x, y) = cell(&buf, "new();");
+        let (x, y) = cell(&buf, "+    new();");
         assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.success);
-        s.handle_key(&files, KeyCode::Char('j'));
-        s.handle_key(&files, KeyCode::Char('j'));
+        let (x, y) = cell(&buf, " fn main() {");
+        assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.text);
+
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
         assert_eq!(s.selected(), 3, "clamped at the last file");
+        assert_eq!(s.take_request(), None, "a removed file needs no content");
+        let (rows, buf) = draw(&mut s, &files, 12);
+        assert_eq!(count(&rows, "1 -gone"), 1, "{rows:?}");
+        let (x, y) = cell(&buf, "-gone");
+        assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.error);
+        assert!(
+            rows[y as usize][65..].trim_matches(['│', ' ']).is_empty(),
+            "new side blank: {rows:?}"
+        );
+
         for _ in 0..10 {
-            s.handle_key(&files, KeyCode::Char('k'));
+            s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('k'));
         }
         assert_eq!(s.selected(), 1, "clamped at the first file");
-        s.handle_key(&files, KeyCode::Tab);
+        assert_eq!(s.take_request(), None, "README.md was requested before");
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
         assert_eq!(s.focus(), Panel::Old);
-        s.handle_key(&files, KeyCode::Tab);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
         assert_eq!(s.focus(), Panel::New);
-        s.handle_key(&files, KeyCode::Tab);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
         assert_eq!(s.focus(), Panel::Tree);
-        s.handle_key(&files, KeyCode::BackTab);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab);
         assert_eq!(s.focus(), Panel::New);
-        let buf = render_buffer(100, 12, |f| s.render(&files, f.area(), f.buffer_mut()));
+        let (_, buf) = draw(&mut s, &files, 12);
         assert_eq!(
             buf[(0, 0)].fg,
             theme::TEMPLATE.border,
             "tree border unfocused"
         );
         assert_eq!(buf[(99, 0)].fg, theme::TEMPLATE.hi, "new side focused");
-        s.handle_key(&files, KeyCode::Char('j'));
-        assert_eq!(s.selected(), 1, "selection untouched");
-        let buf = render_buffer(100, 12, |f| s.render(&files, f.area(), f.buffer_mut()));
-        let lines = rows(&buf);
-        assert!(
-            lines[1].contains("   1 # Title") && !lines.iter().any(|l| l.contains("@@ -0,0")),
-            "scrolled both: {lines:?}"
+        assert_eq!(
+            buf[(TREE_WIDTH, 0)].fg,
+            theme::TEMPLATE.border,
+            "old side unfocused"
         );
-        s.handle_key(&files, KeyCode::Char('j'));
-        let buf = render_buffer(100, 12, |f| s.render(&files, f.area(), f.buffer_mut()));
-        assert!(
-            rows(&buf)[1].contains("   1 # Title"),
-            "never past the last row"
-        );
-        s.handle_key(&files, KeyCode::Char('k'));
-        s.handle_key(&files, KeyCode::Char('k'));
-        let buf = render_buffer(100, 12, |f| s.render(&files, f.area(), f.buffer_mut()));
-        assert!(rows(&buf)[1].contains("@@ -0,0"), "back at the top");
     }
 
     #[test]
-    /// TU-E-033 — with no files the tree reads `None`, the diff sides stay empty and keys do nothing.
+    /// TU-R-075 — on a focused diff side j and k move its active line and the other side mirrors it; the scroll offset is mirrored too so the same row faces on both sides; the selection stays.
+    fn ut_side_navigation_mirrors() {
+        let files = files();
+        let mut s = FilesState::new(&files);
+        s.take_request();
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        assert_eq!(s.take_request().as_deref(), Some("src/main.rs"));
+        s.handle_blob(&files, "src/main.rs", text("fn main() {\n    new();\n}\n"));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab);
+        assert_eq!(s.focus(), Panel::New);
+        assert_eq!(s.active_lines(), Some((0, 0)));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        assert_eq!(s.active_lines(), Some((1, 1)));
+        assert_eq!(s.selected(), 0, "selection untouched");
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Down);
+        assert_eq!(s.active_lines(), Some((2, 2)));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        assert_eq!(s.active_lines(), Some((2, 2)), "never past the last row");
+        let (rows, _) = draw(&mut s, &files, 4);
+        assert_eq!(count(&rows, "fn main() {"), 0, "scrolled both: {rows:?}");
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("-    old();") && r.contains("+    new();")),
+            "{rows:?}"
+        );
+        assert_eq!(count(&rows, "3  }"), 2, "{rows:?}");
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('k'));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('k'));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Up);
+        assert_eq!(s.active_lines(), Some((0, 0)));
+        let (rows, _) = draw(&mut s, &files, 4);
+        assert_eq!(
+            count(&rows, "1  fn main() {"),
+            2,
+            "back at the top: {rows:?}"
+        );
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab);
+        assert_eq!(s.focus(), Panel::Old);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        assert_eq!(s.active_lines(), Some((1, 1)));
+    }
+
+    #[test]
+    /// TU-R-076, TU-E-035, TU-E-036, TU-E-039, TU-E-040 — a failed request shows its message in the error color, a binary file `Binary file`, a too large one `File too large`; content for an unknown path is discarded; focus on a side showing a notice still colors its border and ignores navigation keys.
+    fn ut_notices() {
+        let files = vec![
+            file("a", FileStatus::Modified, Some("@@ -1 +1 @@\n-x\n+y\n")),
+            file("b", FileStatus::Modified, Some("@@ -1 +1 @@\n-x\n+y\n")),
+            file("c", FileStatus::Modified, Some("@@ -1 +1 @@\n-x\n+y\n")),
+        ];
+        let mut s = FilesState::new(&files);
+        assert_eq!(s.take_request().as_deref(), Some("a"));
+        s.handle_blob(&files, "a", Err::<Blob, _>("github: HTTP 502"));
+        let (rows, buf) = draw(&mut s, &files, 6);
+        assert_eq!(count(&rows, "github: HTTP 502"), 2, "{rows:?}");
+        let (x, y) = cell(&buf, "github: HTTP 502");
+        assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.error);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        assert_eq!(s.focus(), Panel::Old);
+        let (_, buf) = draw(&mut s, &files, 6);
+        assert_eq!(
+            buf[(TREE_WIDTH, 0)].fg,
+            theme::TEMPLATE.hi,
+            "old side focused"
+        );
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        assert_eq!(s.take_request().as_deref(), Some("b"));
+        s.handle_blob(&files, "b", Ok::<_, String>(Blob::Binary));
+        let (rows, _) = draw(&mut s, &files, 6);
+        assert_eq!(count(&rows, "Binary file"), 2, "{rows:?}");
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        assert_eq!(s.take_request().as_deref(), Some("c"));
+        s.handle_blob(&files, "zzz", text("ignored"));
+        let (rows, _) = draw(&mut s, &files, 6);
+        assert_eq!(count(&rows, LOADING), 2, "still loading: {rows:?}");
+        s.handle_blob(&files, "c", Ok::<_, String>(Blob::TooLarge));
+        let (rows, _) = draw(&mut s, &files, 6);
+        assert_eq!(count(&rows, "File too large"), 2, "{rows:?}");
+        s.handle_blob(&files, "a", text("y\n"));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('k'));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('k'));
+        assert_eq!(s.take_request(), None);
+        let (rows, _) = draw(&mut s, &files, 6);
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("1 -x") && r.contains("1 +y")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    /// TU-E-033 — with no files the tree reads `None`, the diff sides stay empty, nothing is requested and keys do nothing.
     fn ut_no_files() {
         let mut s = FilesState::new(&[]);
+        assert_eq!(s.take_request(), None);
         for code in [KeyCode::Char('j'), KeyCode::Char('k'), KeyCode::Tab] {
-            s.handle_key(&[], code);
+            s.handle_key(&[], KeyModifiers::NONE, code);
         }
-        s.handle_key(&[], KeyCode::Char('j'));
-        let buf = render_buffer(100, 8, |f| s.render(&[], f.area(), f.buffer_mut()));
-        let lines = rows(&buf);
-        assert!(lines[1].contains("None"), "{lines:?}");
-        assert!(!lines.iter().any(|l| l.contains("No diff")), "{lines:?}");
+        s.handle_key(&[], KeyModifiers::NONE, KeyCode::Char('j'));
+        s.handle_blob(&[], "x", text("x"));
+        let (rows, _) = draw(&mut s, &[], 8);
+        assert!(rows[1].contains("None"), "{rows:?}");
+        assert!(
+            !rows
+                .iter()
+                .any(|l| l.contains("No diff") || l.contains(LOADING)),
+            "{rows:?}"
+        );
     }
 }

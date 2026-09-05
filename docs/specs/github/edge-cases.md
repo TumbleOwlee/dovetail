@@ -38,3 +38,4 @@ table rows included. Cite the governing requirement inline.
 **GH-E-009** — The issue timeline query spreads no fragment on a pull-request-only item type (merged, review requested, review): GitHub rejects such a fragment inside `IssueTimelineItems` even when the type filter excludes it. Cites GH-R-010.
 **GH-E-010** — A pull request with more than 100 commits shows the first 100 only. Cites GH-R-018.
 **GH-E-011** — A changed file without a `patch` field (binary, or a diff GitHub considers too large) is loaded with no patch; an unknown `status` value is loaded as `changed`. Cites GH-R-019.
+**GH-E-012** — A path that does not exist at the commit (a file removed by the pull request, or a wrong path) yields a null object and the typed error `blob not found`. Cites GH-R-020.

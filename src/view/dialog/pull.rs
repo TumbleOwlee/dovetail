@@ -47,6 +47,10 @@ pub fn badges(labels: &[crate::github::board::Label]) -> Vec<Line<'static>> {
 
 /// The overlay content of a pull request: seven boxes, reviewers first.
 pub fn content(details: PullDetails) -> DetailsContent {
+    let (owner, repo) = details
+        .repository
+        .split_once('/')
+        .unwrap_or((details.repository.as_str(), ""));
     let reviewers = details
         .reviewers
         .iter()
@@ -70,6 +74,9 @@ pub fn content(details: PullDetails) -> DetailsContent {
         panes: Panes::Pull {
             commits: details.commits,
             files: details.files,
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            head_oid: details.head_oid,
         },
         title: details.title,
         state,
@@ -158,6 +165,8 @@ mod tests {
             body: "b".into(),
             state: PullState::Open,
             draft: true,
+            head_oid: "abc".into(),
+            repository: "o/r".into(),
             author: Some("octo".into()),
             reviewers: vec![
                 Reviewer {
@@ -215,7 +224,10 @@ mod tests {
             c.panes,
             Panes::Pull {
                 commits: vec![commit.clone()],
-                files: vec![file.clone()]
+                files: vec![file.clone()],
+                owner: "o".into(),
+                repo: "r".into(),
+                head_oid: "abc".into(),
             }
         );
         assert_eq!(

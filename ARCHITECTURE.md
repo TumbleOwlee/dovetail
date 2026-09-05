@@ -14,8 +14,8 @@ TUI application, stack: Rust (stable toolchain, pinned via `rust-toolchain.toml`
 | `config` | Serde schema of both files, resolution, validation, profile derivation, writers, origin URL parsing | `config` |
 | `app` | Held state: configuration, settings, active tab, open dialog, command line; key dispatch; frame layout | `tui` |
 | `event` | The async loop over terminal events and application messages; runs fetches the app queues and sends their outcomes back | `tui` |
-| `github` | GitHub API calls via GraphQL: listing an owner's Projects (v2), loading a project board's Status columns and issue cards, loading one issue's details with its timeline and sidebar fields by node id, listing a repository's pull requests, loading one pull request with its timeline; `github::timeline` decodes the timeline items both share; loading a pull request's changed files with their patches through the REST files endpoint | `github` |
-| `diff` | Splits a unified patch into side-by-side rows: context on both sides, removed lines paired with added ones in order, hunk headers verbatim | `tui` |
+| `github` | GitHub API calls via GraphQL: listing an owner's Projects (v2), loading a project board's Status columns and issue cards, loading one issue's details with its timeline and sidebar fields by node id, listing a repository's pull requests, loading one pull request with its timeline; `github::timeline` decodes the timeline items both share; loading a pull request's changed files with their patches through the REST files endpoint; `github::blob` loads one file's content at a commit | `github` |
+| `diff` | Lays a whole file out side by side from its new content and its unified patch: unchanged lines on both sides, removed lines paired with added ones in order, filler rows where a change is uneven | `tui` |
 | `atlassian` | Atlassian REST calls: listing a Jira site's projects | `atlassian` |
 | `command` | `Cmd` parser and the help rows | `tui` |
 | `view::tabs` | Tab line and per-tab summary body | `tui` |
@@ -25,8 +25,8 @@ TUI application, stack: Rust (stable toolchain, pinned via `rust-toolchain.toml`
 | `view::command_line` | The `:` prompt, the help box above it while open, and the hint bar, error or notice shown while closed | `tui` |
 | `view::dialog::config` | The configuration dialog: kind selections, per-kind fields, validation, forms | `tui` |
 | `view::dialog::details` | The details overlay shared by issues and pull requests: description card and one box per timeline item scrolled together, a fixed-width bar of focusable boxes at the right, loading and failure states; for pull requests a tab line switching between the conversation, the commits list and the changed files | `tui` |
-| `view::dialog::commits` | The `Commits` tab: one line per commit with a selection kept in view | `tui` |
-| `view::dialog::files` | The `Files Changed` tab: file tree panel, old and new diff panels, focus cycling and scrolling | `tui` |
+| `view::dialog::commits` | The `Commits` tab: a table of the commits with a selection | `tui` |
+| `view::dialog::files` | The `Files Changed` tab: file tree panel, the selected file's old and new state as two read-only code fields with mirrored navigation, lazily requested and cached file contents | `tui` |
 | `view::dialog::issue` | Maps an issue to overlay content: its seven bar boxes | `tui` |
 | `view::dialog::pull` | Maps a pull request to overlay content: its seven bar boxes, badge and login line helpers | `tui` |
 

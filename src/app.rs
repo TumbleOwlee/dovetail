@@ -17,7 +17,7 @@ use crate::view::board::{self, BoardView};
 use crate::view::command_line::{CommandLine, CommandLineEvent};
 use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteForm};
 use crate::view::dialog::config::{Choice, Field};
-use crate::view::dialog::details::{DetailsDialog, DetailsEvent, Link};
+use crate::view::dialog::details::{BlobRef, DetailsDialog, DetailsEvent, Link};
 use crate::view::dialog::{issue, pull};
 use crate::view::notice;
 use crate::view::remote::RemoteView;
@@ -54,6 +54,13 @@ pub enum FetchRequest {
         owner: String,
         repo: String,
         number: u64,
+    },
+    Blob {
+        token: String,
+        owner: String,
+        repo: String,
+        oid: String,
+        path: String,
     },
 }
 
@@ -271,6 +278,27 @@ impl App {
         }
     }
 
+    /// Queues the file content request of the pull request overlay, with either GitHub token.
+    fn request_blob(&mut self, blob: Option<BlobRef>) {
+        let Some(blob) = blob else {
+            return;
+        };
+        let Some(token) = self
+            .github_remote()
+            .map(|(_, _, t)| t)
+            .or_else(|| self.github_board().map(|(_, _, t)| t))
+        else {
+            return;
+        };
+        self.pending_fetches.push(FetchRequest::Blob {
+            token: token.to_string(),
+            owner: blob.owner,
+            repo: blob.repo,
+            oid: blob.oid,
+            path: blob.path,
+        });
+    }
+
     /// Fetches queued since the last call, for the loop to run.
     pub fn take_fetch_requests(&mut self) -> Vec<FetchRequest> {
         std::mem::take(&mut self.pending_fetches)
@@ -295,7 +323,15 @@ impl App {
         }
         if let Message::PullRequest(result) = message {
             if let Some(dialog) = self.pull.as_mut() {
-                dialog.set_result(result.map(pull::content));
+                let blob = dialog.set_result(result.map(pull::content));
+                self.request_blob(blob);
+            }
+            return;
+        }
+        if let Message::Blob { path, result } = message {
+            if let Some(dialog) = self.pull.as_mut() {
+                let blob = dialog.handle_blob(&path, result);
+                self.request_blob(blob);
             }
             return;
         }
@@ -335,7 +371,8 @@ impl App {
             Message::Board(_)
             | Message::Issue(_)
             | Message::PullRequests(_)
-            | Message::PullRequest(_) => {
+            | Message::PullRequest(_)
+            | Message::Blob { .. } => {
                 unreachable!("handled above")
             }
         };
@@ -384,6 +421,7 @@ impl App {
                     self.issue = None;
                     self.open_link(link);
                 }
+                DetailsEvent::Fetch(_) => {}
             }
             return;
         }
@@ -395,6 +433,7 @@ impl App {
                     self.pull = None;
                     self.open_link(link);
                 }
+                DetailsEvent::Fetch(blob) => self.request_blob(Some(blob)),
             }
             return;
         }
@@ -1449,6 +1488,76 @@ mod tests {
             rows.iter().any(|r| r.contains("owner: o")),
             "summary stays: {rows:?}"
         );
+    }
+
+    #[test]
+    /// TU-R-076, TU-E-039 — a pull request's first changed file is requested at the head commit with the remote token as soon as its details arrive; the arriving content lands in the overlay and asks for nothing more; a selection change in the Files tab requests the next file; content arriving after the overlay closed is discarded.
+    fn ut_blob_requests_follow_the_files_tab() {
+        use crate::github::blob::Blob;
+        use crate::github::files::{ChangedFile, FileStatus};
+        let t = TempDir::new("blob");
+        let mut a = app(&t, Some(remote_settings()));
+        a.take_fetch_requests();
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        key(&mut a, KeyCode::Char('1'));
+        a.handle_message(Message::PullRequests(Ok(vec![
+            crate::github::pulls::PullRequest {
+                number: 5,
+                ..Default::default()
+            },
+        ])));
+        key(&mut a, KeyCode::Enter);
+        a.take_fetch_requests();
+        let file = |path: &str| ChangedFile {
+            path: path.into(),
+            previous_path: None,
+            status: FileStatus::Modified,
+            additions: 1,
+            deletions: 1,
+            patch: Some("@@ -1 +1 @@\n-x\n+y\n".into()),
+        };
+        a.handle_message(Message::PullRequest(Ok(crate::github::pull::PullDetails {
+            number: 5,
+            head_oid: "0123abcd".into(),
+            repository: "o/r".into(),
+            files: vec![file("b.rs"), file("a.rs")],
+            ..Default::default()
+        })));
+        let blob = |path: &str| FetchRequest::Blob {
+            token: "t".into(),
+            owner: "o".into(),
+            repo: "r".into(),
+            oid: "0123abcd".into(),
+            path: path.into(),
+        };
+        assert_eq!(a.take_fetch_requests(), vec![blob("a.rs")]);
+        a.handle_message(Message::Blob {
+            path: "a.rs".into(),
+            result: Ok(Blob::Text("y\n".into())),
+        });
+        assert!(a.take_fetch_requests().is_empty());
+        let rows = render_rows(100, 30, |f| a.render(f));
+        assert!(
+            !rows.iter().any(|r| r.contains("Loading file..")),
+            "{rows:?}"
+        );
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        key(&mut a, KeyCode::Char('2'));
+        let rows = render_rows(100, 30, |f| a.render(f));
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("1 -x") && r.contains("1 +y")),
+            "{rows:?}"
+        );
+        key(&mut a, KeyCode::Char('j'));
+        assert_eq!(a.take_fetch_requests(), vec![blob("b.rs")]);
+        key(&mut a, KeyCode::Esc);
+        assert!(a.pull.is_none());
+        a.handle_message(Message::Blob {
+            path: "b.rs".into(),
+            result: Ok(Blob::Binary),
+        });
+        assert!(a.take_fetch_requests().is_empty());
     }
 
     #[test]

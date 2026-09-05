@@ -33,6 +33,8 @@ pub enum GithubError {
     MissingRepository,
     #[error("github: pull request not found")]
     MissingPullRequest,
+    #[error("github: blob not found")]
+    MissingBlob,
     #[error("github: {0}")]
     Decode(String),
 }
