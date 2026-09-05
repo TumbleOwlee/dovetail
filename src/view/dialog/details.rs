@@ -16,7 +16,7 @@ use crate::github::pull::{Commit, ReviewState};
 use crate::github::timeline::{Event, TimelineItem};
 use crate::view::board::wrap_title;
 use crate::view::board::{badge_text_color, label_color};
-use crate::view::dialog::{commits, files::FilesState};
+use crate::view::dialog::{commits::CommitsView, files::FilesState};
 use crate::view::{notice, theme};
 
 /// Screen cells left free around the overlay on each side.
@@ -128,7 +128,6 @@ pub enum DetailsEvent {
     Open(Link),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 enum Content {
     Loading,
     Failed(String),
@@ -142,13 +141,11 @@ enum Content {
         tab: DetailsTab,
         /// Ctrl+T was pressed; the next key selects a tab.
         prefix: bool,
-        /// The selected commit of the `Commits` tab.
-        commit: usize,
+        commits: Box<CommitsView>,
         files: FilesState,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetailsDialog {
     number: u64,
     title: String,
@@ -171,6 +168,10 @@ impl DetailsDialog {
     pub fn set_result(&mut self, result: Result<DetailsContent, impl ToString>) {
         self.content = match result {
             Ok(content) => Content::Loaded {
+                commits: Box::new(CommitsView::new(match &content.panes {
+                    Panes::Conversation => &[],
+                    Panes::Pull { commits, .. } => commits,
+                })),
                 files: FilesState::new(match &content.panes {
                     Panes::Conversation => &[],
                     Panes::Pull { files, .. } => files,
@@ -181,7 +182,6 @@ impl DetailsDialog {
                 cursor: 0,
                 tab: DetailsTab::Conversation,
                 prefix: false,
-                commit: 0,
             },
             Err(e) => Content::Failed(e.to_string()),
         };
@@ -199,15 +199,15 @@ impl DetailsDialog {
             cursor,
             tab,
             prefix,
-            commit,
+            commits,
             files,
         } = &mut self.content
         else {
             return DetailsEvent::Consumed;
         };
-        let (commits, changed): (&[Commit], &[ChangedFile]) = match &content.panes {
-            Panes::Conversation => (&[], &[]),
-            Panes::Pull { commits, files } => (commits, files),
+        let changed: &[ChangedFile] = match &content.panes {
+            Panes::Conversation => &[],
+            Panes::Pull { files, .. } => files,
         };
         if std::mem::take(prefix) {
             if matches!(content.panes, Panes::Pull { .. }) {
@@ -233,13 +233,7 @@ impl DetailsDialog {
         match tab {
             DetailsTab::Conversation => {}
             DetailsTab::Commits => {
-                match code {
-                    KeyCode::Char('j') => {
-                        *commit = (*commit + 1).min(commits.len().saturating_sub(1))
-                    }
-                    KeyCode::Char('k') => *commit = commit.saturating_sub(1),
-                    _ => {}
-                }
+                commits.handle_key(modifiers, code);
                 return DetailsEvent::Consumed;
             }
             DetailsTab::Files => {
@@ -286,7 +280,7 @@ impl DetailsDialog {
                 focus,
                 cursor,
                 tab,
-                commit,
+                commits,
                 files,
                 ..
             } => {
@@ -301,8 +295,8 @@ impl DetailsDialog {
                     }
                 };
                 match (&content.panes, *tab) {
-                    (Panes::Pull { commits, .. }, DetailsTab::Commits) => {
-                        commits::render(commits, *commit, body, buf);
+                    (Panes::Pull { .. }, DetailsTab::Commits) => {
+                        commits.render(body, buf);
                     }
                     (Panes::Pull { files: changed, .. }, DetailsTab::Files) => {
                         files.render(changed, body, buf);
@@ -604,6 +598,7 @@ fn render_cards(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::pull::CommitAuthor;
     use crate::testkit::{render_buffer, render_rows};
 
     fn content(body: &str, timeline: Vec<TimelineItem>) -> DetailsContent {
@@ -912,7 +907,7 @@ mod tests {
             commits: vec![Commit {
                 sha: "abc1234".into(),
                 headline: "Fix crash".into(),
-                author: "octo".into(),
+                author: CommitAuthor::User("octo".into()),
                 date: "2026-09-03T10:00:00Z".into(),
             }],
             files: vec![ChangedFile {
@@ -941,7 +936,7 @@ mod tests {
         let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
         assert!(
             rows.iter()
-                .any(|r| r.contains(" Commits ") && !r.contains("[1]")),
+                .any(|r| r.contains("Commits") && r.contains("┌") && !r.contains("[1]")),
             "{rows:?}"
         );
         assert!(
@@ -1014,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-073 — j and k move the commit selection in the Commits tab.
+    /// TU-R-073 — keys in the Commits tab move the table's selection.
     fn ut_commit_selection() {
         let mut d = DetailsDialog::new(5, "Fix".into(), "Loading");
         let mut c = content("body", vec![]);
@@ -1023,7 +1018,7 @@ mod tests {
                 .map(|i| Commit {
                     sha: format!("sha{i}"),
                     headline: format!("c{i}"),
-                    author: "o".into(),
+                    author: CommitAuthor::Git("o".into()),
                     date: "2026-09-03T10:00:00Z".into(),
                 })
                 .collect(),
@@ -1036,22 +1031,23 @@ mod tests {
             d.handle_key(KeyModifiers::NONE, KeyCode::Char('j'));
         }
         assert!(
-            matches!(&d.content, Content::Loaded { commit: 2, .. }),
+            matches!(&d.content, Content::Loaded { commits, .. } if commits.selected() == Some(2)),
             "clamped"
         );
         d.handle_key(KeyModifiers::NONE, KeyCode::Char('k'));
-        assert!(matches!(&d.content, Content::Loaded { commit: 1, .. }));
-        let buf = render_buffer(100, 30, |f| d.render(f.area(), f.buffer_mut()));
-        let (x, y) = (0..buf.area.height)
-            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
-            .find(|&(x, y)| {
-                (x..buf.area.width)
-                    .map(|x| buf[(x, y)].symbol())
-                    .collect::<String>()
-                    .starts_with("sha2")
-            })
-            .expect("sha2 drawn");
-        assert_eq!(buf[(x, y)].bg, theme::TEMPLATE.hi_bg);
+        assert!(
+            matches!(&d.content, Content::Loaded { commits, .. } if commits.selected() == Some(1))
+        );
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("Commit ID") && r.contains("Description")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("sha2") && r.contains("c2")),
+            "{rows:?}"
+        );
     }
 
     #[test]

@@ -55,12 +55,14 @@ pub fn render_rows<F: FnOnce(&mut ratatui::Frame)>(
     height: u16,
     render: F,
 ) -> Vec<String> {
-    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test backend");
-    terminal.draw(render).expect("draw");
-    let buf = terminal.backend().buffer();
-    (0..height)
+    buffer_rows(&render_buffer(width, height, render))
+}
+
+/// The buffer's rows as trimmed-right strings.
+pub fn buffer_rows(buf: &ratatui::buffer::Buffer) -> Vec<String> {
+    (0..buf.area.height)
         .map(|y| {
-            (0..width)
+            (0..buf.area.width)
                 .map(|x| buf[(x, y)].symbol())
                 .collect::<String>()
                 .trim_end()

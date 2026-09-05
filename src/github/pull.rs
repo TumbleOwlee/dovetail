@@ -55,13 +55,19 @@ pub struct PullDetails {
     pub timeline: Vec<TimelineItem>,
 }
 
+/// Who authored a commit: the GitHub account it is linked to, or only the git author name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitAuthor {
+    User(String),
+    Git(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commit {
     /// Abbreviated object id.
     pub sha: String,
     pub headline: String,
-    /// The GitHub login when known, else the git author name.
-    pub author: String,
+    pub author: CommitAuthor,
     /// Committed date, ISO 8601.
     pub date: String,
 }
@@ -315,11 +321,17 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
                 .into_iter()
                 .map(|c| {
                     let c = c.commit;
-                    let author = c.author.and_then(|a| a.user.map(|u| u.login).or(a.name));
+                    let author = match c.author {
+                        Some(GitAuthor {
+                            user: Some(user), ..
+                        }) => CommitAuthor::User(user.login),
+                        Some(GitAuthor { name, .. }) => CommitAuthor::Git(name.unwrap_or_default()),
+                        None => CommitAuthor::Git(String::new()),
+                    };
                     Commit {
                         sha: c.abbreviated_oid,
                         headline: c.message_headline,
-                        author: author.unwrap_or_default(),
+                        author,
                         date: c.committed_date,
                     }
                 })
@@ -478,13 +490,13 @@ mod tests {
                 Commit {
                     sha: "abc1234".into(),
                     headline: "Fix crash".into(),
-                    author: "octo".into(),
+                    author: CommitAuthor::User("octo".into()),
                     date: "2026-09-03T10:00:00Z".into()
                 },
                 Commit {
                     sha: "def5678".into(),
                     headline: "Add test".into(),
-                    author: "Anon".into(),
+                    author: CommitAuthor::Git("Anon".into()),
                     date: "2026-09-04T10:00:00Z".into()
                 }
             ]

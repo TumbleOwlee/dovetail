@@ -132,8 +132,8 @@ pub fn content(details: PullDetails) -> DetailsContent {
 mod tests {
     use super::*;
     use crate::github::board::Label;
-    use crate::github::pull::IssueRef;
     use crate::github::pull::Reviewer;
+    use crate::github::pull::{CommitAuthor, IssueRef};
 
     #[test]
     /// TU-R-066, TU-R-068 — state and author carried; seven boxes in order with reviewer states, `@` logins, label badges and references.
@@ -141,7 +141,7 @@ mod tests {
         let commit = crate::github::pull::Commit {
             sha: "abc".into(),
             headline: "h".into(),
-            author: "o".into(),
+            author: CommitAuthor::User("o".into()),
             date: "d".into(),
         };
         let file = crate::github::files::ChangedFile {
