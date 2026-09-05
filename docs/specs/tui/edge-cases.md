@@ -70,3 +70,6 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-038** | The head content holds fewer lines than the patch addresses | The patch's own text stands in for the missing lines; never a crash; cites TU-R-074 |
 | **TU-E-039** | A file's content arrives after the overlay was closed, or for a path not in the tree | Discarded; cites TU-R-076 |
 | **TU-E-040** | Focus moves to a diff side while it shows a notice instead of a file | The side's border still shows the focus; navigation keys do nothing; cites TU-R-075 |
+| **TU-E-041** | `h` at the first column, or `l` at the end of the line, on a diff side | Nothing moves; the column never wraps to another line; cites TU-R-075 |
+| **TU-E-042** | The active line of a diff side moves onto a shorter line than the current column | The column clamps to that line's end and the horizontal scroll follows; cites TU-R-075 |
+| **TU-E-043** | A markdown body is empty or whitespace only | The card holds only its header lines; the body takes no rows; cites TU-R-077 |

@@ -2,8 +2,11 @@
 //! timeline item at the left, scrolled together, and a bar of focusable boxes at the right.
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use ferrowl_ui::state::ScrollingTabsState;
-use ferrowl_ui::widgets::ScrollingTabsBuilder;
+use ferrowl_ui::state::{
+    CodeInputFieldStateBuilder, MarkdownInputFieldState, MarkdownInputFieldStateBuilder,
+    ScrollingTabsState,
+};
+use ferrowl_ui::widgets::{MarkdownInputField, MarkdownInputFieldBuilder, ScrollingTabsBuilder};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, HorizontalAlignment, Layout, Margin, Rect};
 use ratatui::style::{Color, Style};
@@ -15,7 +18,6 @@ use crate::github::board::Label;
 use crate::github::files::ChangedFile;
 use crate::github::pull::{Commit, ReviewState};
 use crate::github::timeline::{Event, TimelineItem};
-use crate::view::board::wrap_title;
 use crate::view::board::{badge_text_color, label_color};
 use crate::view::dialog::{commits::CommitsView, files::FilesState};
 use crate::view::{notice, theme};
@@ -398,14 +400,20 @@ struct CardText {
     title: String,
     margin: Margin,
     lines: Vec<Line<'static>>,
+    /// Markdown drawn below the lines; empty for none.
+    body: String,
     /// Border color.
     color: Color,
 }
 
 impl CardText {
-    /// Rows the card takes with its borders and padding.
-    fn height(&self) -> u16 {
-        self.lines.len() as u16 + 2 + 2 * self.margin.vertical
+    /// Rows the card takes with its borders and padding at `width`.
+    fn height(&self, width: u16) -> u16 {
+        let text_width = width.saturating_sub(2 + 2 * self.margin.horizontal);
+        self.lines.len() as u16
+            + markdown_rows(&self.body, text_width)
+            + 2
+            + 2 * self.margin.vertical
     }
 
     fn render(self, area: Rect, buf: &mut Buffer) {
@@ -414,16 +422,61 @@ impl CardText {
             .title(self.title);
         let inner = block.inner(area).inner(self.margin);
         block.render(area, buf);
+        let [top, body] = Layout::vertical([
+            Constraint::Length(self.lines.len() as u16),
+            Constraint::Min(0),
+        ])
+        .areas(inner);
         Paragraph::new(self.lines)
             .style(theme::base())
-            .render(inner, buf);
+            .render(top, buf);
+        if !self.body.trim().is_empty() {
+            let mut state = markdown_state(&self.body, false);
+            StatefulWidget::render(&markdown_widget(), body, buf, &mut state);
+        }
     }
 }
 
-fn wrapped(text: &str, width: usize) -> impl Iterator<Item = Line<'static>> + '_ {
-    text.lines()
-        .flat_map(move |line| wrap_title(line, width))
-        .map(Line::from)
+/// A read-only, unfocused markdown state holding `body` plus one trailing empty line, with the
+/// active line at the top or on that trailing line.
+fn markdown_state(body: &str, active_last: bool) -> MarkdownInputFieldState {
+    let mut inner = CodeInputFieldStateBuilder::default()
+        .vim(true)
+        .focused(false)
+        .build()
+        .expect("CodeInputFieldState fields all default");
+    inner.set_content(&format!("{body}\n"));
+    let active = if active_last {
+        inner.lines().len() - 1
+    } else {
+        0
+    };
+    inner.set_active_line(active);
+    inner.set_cursor_col(0);
+    MarkdownInputFieldStateBuilder::default()
+        .inner(inner)
+        .build()
+        .expect("MarkdownInputFieldState fields all default")
+}
+
+fn markdown_widget() -> MarkdownInputField {
+    MarkdownInputFieldBuilder::default()
+        .style(theme::input_field_style())
+        .build()
+        .expect("MarkdownInputField fields all default")
+}
+
+/// The display rows `body` wraps to at `width`, measured by the widget itself: rendered one
+/// row tall with the active line on the trailing empty line, its row scroll settles on the
+/// number of rows before that line.
+fn markdown_rows(body: &str, width: u16) -> u16 {
+    if body.trim().is_empty() || width == 0 {
+        return 0;
+    }
+    let mut state = markdown_state(body, true);
+    let mut scratch = Buffer::empty(Rect::new(0, 0, width, 1));
+    StatefulWidget::render(&markdown_widget(), scratch.area, &mut scratch, &mut state);
+    state.row_scroll() as u16
 }
 
 /// The boxes stacked top to bottom, each as tall as its entries, cut at the bottom; the focused
@@ -448,13 +501,14 @@ fn render_bar(boxes: &[SidebarBox], focus: usize, cursor: usize, area: Rect, buf
             title: format!(" {} ", item.title),
             margin: BOX_MARGIN,
             lines,
+            body: String::new(),
             color: if i == focus {
                 theme::TEMPLATE.hi
             } else {
                 theme::TEMPLATE.border
             },
         };
-        let height = card.height().min(area.bottom().saturating_sub(y));
+        let height = card.height(area.width).min(area.bottom().saturating_sub(y));
         if height < 2 {
             break;
         }
@@ -525,13 +579,17 @@ fn review_state(state: ReviewState) -> &'static str {
 }
 
 /// One box per timeline item: a padded comment body, or one event line.
-fn timeline_card(item: &TimelineItem, text_width: usize) -> CardText {
+fn timeline_card(item: &TimelineItem) -> CardText {
     let actor = item.actor.as_deref().unwrap_or("ghost");
     let date: String = item.created_at.chars().take(10).collect();
     let title = format!(" {} · @{actor} · {date} ", event_name(&item.event));
     let dim = theme::on_bg(theme::TEMPLATE.placeholder);
+    let mut markdown = String::new();
     let (margin, lines): (Margin, Vec<Line<'static>>) = match &item.event {
-        Event::Comment { body } => (CARD_MARGIN, wrapped(body, text_width).collect()),
+        Event::Comment { body } => {
+            markdown = body.clone();
+            (CARD_MARGIN, vec![])
+        }
         Event::Assigned { login } | Event::Unassigned { login } => {
             (BOX_MARGIN, vec![Line::raw(format!("@{login}"))])
         }
@@ -567,9 +625,8 @@ fn timeline_card(item: &TimelineItem, text_width: usize) -> CardText {
             (BOX_MARGIN, vec![Line::raw(format!("@{reviewer}"))])
         }
         Event::Reviewed { state, body } => {
-            let mut lines = vec![Line::styled(review_state(*state), dim)];
-            lines.extend(wrapped(body, text_width));
-            (BOX_MARGIN, lines)
+            markdown = body.clone();
+            (BOX_MARGIN, vec![Line::styled(review_state(*state), dim)])
         }
         Event::Referenced { id, headline } => (
             BOX_MARGIN,
@@ -594,6 +651,7 @@ fn timeline_card(item: &TimelineItem, text_width: usize) -> CardText {
         title,
         margin,
         lines,
+        body: markdown,
         color: event_color(&item.event),
     }
 }
@@ -606,9 +664,8 @@ fn render_cards(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let text_width = area.width.saturating_sub(2 + 2 * CARD_MARGIN.horizontal) as usize;
     let author = content.author.as_deref().unwrap_or("ghost");
-    let mut description: Vec<Line<'static>> = vec![
+    let description: Vec<Line<'static>> = vec![
         Line::styled(content.title.clone(), theme::on_bg(theme::TEMPLATE.text_hi)),
         Line::from(vec![
             Span::styled(content.state, theme::on_bg(theme::TEMPLATE.hi)),
@@ -617,11 +674,11 @@ fn render_cards(
         ]),
         Line::raw(""),
     ];
-    description.extend(wrapped(&content.body, text_width));
     let mut cards = vec![CardText {
         title: format!(" #{number} "),
         margin: CARD_MARGIN,
         lines: description,
+        body: content.body.clone(),
         color: theme::TEMPLATE.border,
     }];
     if content.timeline.is_empty() {
@@ -632,21 +689,17 @@ fn render_cards(
                 "No activity",
                 theme::on_bg(theme::TEMPLATE.placeholder),
             )],
+            body: String::new(),
             color: theme::TEMPLATE.border,
         });
     }
-    cards.extend(
-        content
-            .timeline
-            .iter()
-            .map(|item| timeline_card(item, text_width)),
-    );
-    let total: u16 = cards.iter().map(CardText::height).sum();
+    cards.extend(content.timeline.iter().map(timeline_card));
+    let total: u16 = cards.iter().map(|c| c.height(area.width)).sum();
     let mut canvas = Buffer::empty(Rect::new(0, 0, area.width, total));
     canvas.set_style(canvas.area, theme::base());
     let mut y = 0;
     for card in cards {
-        let height = card.height();
+        let height = card.height(area.width);
         card.render(Rect::new(0, y, area.width, height), &mut canvas);
         y += height;
     }
@@ -663,6 +716,7 @@ mod tests {
     use super::*;
     use crate::github::pull::CommitAuthor;
     use crate::testkit::{render_buffer, render_rows};
+    use ratatui::style::Modifier;
 
     fn content(body: &str, timeline: Vec<TimelineItem>) -> DetailsContent {
         DetailsContent {
@@ -1284,6 +1338,77 @@ mod tests {
             .expect("card");
         assert!(rows[card + 1].contains("No activity"), "{}", rows[card + 1]);
         assert!(rows[card + 2].contains('└'), "{}", rows[card + 2]);
+    }
+
+    #[test]
+    /// TU-R-077, TU-E-043 — description, comment and review bodies render as markdown: heading markers, emphasis markers and backticks hidden, bullets as `•`, quotes with a bar, no source line revealed and no row highlighted; an empty comment body takes no rows.
+    fn ut_markdown_bodies() {
+        let mut d = DetailsDialog::new(5, "T".into(), "L");
+        let timeline = vec![
+            item(
+                Some("a"),
+                Event::Comment {
+                    body: "> quoted\n- [x] done".into(),
+                },
+            ),
+            item(Some("b"), Event::Comment { body: "".into() }),
+            item(
+                Some("c"),
+                Event::Reviewed {
+                    state: ReviewState::Approved,
+                    body: "## Fine\n[link](https://x.y)".into(),
+                },
+            ),
+        ];
+        let c = content("# Head\n- item\n`code` and **bold**", timeline);
+        d.set_result(Ok::<_, String>(c));
+        let buf = render_buffer(90, 40, |f| d.render(f.area(), f.buffer_mut()));
+        let rows = crate::testkit::buffer_rows(&buf);
+        let find = |text: &str| {
+            rows.iter()
+                .position(|r| r.contains(text))
+                .unwrap_or_else(|| panic!("{text} missing in {rows:?}"))
+        };
+        let head = find("Head");
+        assert!(!rows[head].contains("# Head"), "{}", rows[head]);
+        let x = rows[head][..rows[head].find("Head").expect("x")]
+            .chars()
+            .count() as u16;
+        assert!(
+            buf[(x, head as u16)].modifier.contains(Modifier::BOLD),
+            "heading bold"
+        );
+        assert_eq!(buf[(x, head as u16)].bg, theme::BG, "no row highlight");
+        assert!(rows[head + 1].contains("• item"), "{}", rows[head + 1]);
+        assert!(
+            rows[head + 2].contains("code and bold") && !rows[head + 2].contains('`'),
+            "{}",
+            rows[head + 2]
+        );
+        let quoted = find("quoted");
+        assert!(
+            rows[quoted].contains("▎") && !rows[quoted].contains('>'),
+            "{}",
+            rows[quoted]
+        );
+        assert!(rows[quoted + 1].contains("☑ done"), "{}", rows[quoted + 1]);
+        let empty = find("Comment · @b");
+        assert!(
+            rows[empty + 3].contains('└'),
+            "empty body: {:?}",
+            &rows[empty..empty + 4]
+        );
+        let fine = find("Fine");
+        assert!(
+            rows[fine - 1].contains("approved") && !rows[fine].contains("##"),
+            "{:?}",
+            &rows[fine - 1..=fine]
+        );
+        assert!(
+            rows[fine + 1].contains("link") && !rows[fine + 1].contains("https"),
+            "{}",
+            rows[fine + 1]
+        );
     }
 
     #[test]
