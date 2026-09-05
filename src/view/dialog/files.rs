@@ -199,41 +199,37 @@ impl FilesState {
                     return;
                 };
                 let Fields { old, new } = fields.as_mut();
-                let code = match code {
-                    KeyCode::Char('j') => KeyCode::Down,
-                    KeyCode::Char('k') => KeyCode::Up,
-                    KeyCode::Char('h') => KeyCode::Left,
-                    KeyCode::Char('l') => KeyCode::Right,
-                    other => other,
-                };
                 let (focused, other) = if self.focus == Panel::Old {
                     (old, new)
                 } else {
                     (new, old)
                 };
-                // The field's Left and Right wrap to the neighbouring line at a line's ends;
-                // a diff side keeps its line, so those presses are dropped here.
-                let line_len = focused
-                    .lines()
-                    .get(focused.active_line())
-                    .map_or(0, |l| l.chars().count());
-                let at_edge = match code {
-                    KeyCode::Left => focused.cursor_col() == 0,
-                    KeyCode::Right => focused.cursor_col() + 1 >= line_len,
-                    _ => false,
+                let step: isize = match code {
+                    KeyCode::Char('h') | KeyCode::Left => -1,
+                    KeyCode::Char('l') | KeyCode::Right => 1,
+                    _ => 0,
                 };
-                if !at_edge {
+                if step == 0 {
+                    let code = match code {
+                        KeyCode::Char('j') => KeyCode::Down,
+                        KeyCode::Char('k') => KeyCode::Up,
+                        other => other,
+                    };
                     focused.handle_events(modifiers, code);
+                } else {
+                    let widest = focused
+                        .lines()
+                        .iter()
+                        .map(|l| l.chars().count())
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_sub(1);
+                    let scroll = (focused.h_scroll() as isize + step).clamp(0, widest as isize);
+                    focused.set_h_scroll(scroll as usize);
                 }
-                // The column stays on a character, never past the line's end, so the
-                // horizontal scroll always keeps part of the line in view.
-                let line_len = focused
-                    .lines()
-                    .get(focused.active_line())
-                    .map_or(0, |l| l.chars().count());
-                if focused.cursor_col() + 1 > line_len {
-                    focused.set_cursor_col(line_len.saturating_sub(1));
-                }
+                // No cursor is drawn on a read-only side, so the column only serves the
+                // field's follow-the-cursor logic: parked on the scroll it keeps the view put.
+                focused.set_cursor_col(focused.h_scroll());
                 other.set_active_line(focused.active_line());
                 other.set_cursor_col(focused.cursor_col());
             }
@@ -688,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-075, TU-E-041, TU-E-042 — h/l and Left/Right move the focused side's column, the side scrolls horizontally to show it and the other side mirrors both; h at the first column and l at the line end do nothing and never wrap to another line; a shorter line clamps the column.
+    /// TU-R-075, TU-E-041, TU-E-042 — h/l and Left/Right scroll the focused side one column and the other side mirrors it; nothing moves at the first column or past the widest row's last column; a row shorter than the scroll shows only its gutter; vertical moves keep the scroll.
     fn ut_horizontal_scroll_mirrors() {
         let long = "x".repeat(60);
         let files = vec![file(
@@ -704,47 +700,60 @@ mod tests {
         let (rows, _) = draw(&mut s, &files, 6);
         assert_eq!(count(&rows, "END"), 0, "overflow cut: {rows:?}");
         s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('h'));
+        let (rows, _) = draw(&mut s, &files, 6);
         assert_eq!(
-            s.active_lines(),
-            Some((0, 0)),
-            "h at the first column stays"
+            count(&rows, "1  xxx"),
+            2,
+            "h at the first column stays: {rows:?}"
         );
-        for _ in 0..70 {
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('l'));
+        let (rows, _) = draw(&mut s, &files, 6);
+        assert_eq!(count(&rows, "1 xxx"), 2, "one column: {rows:?}");
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("2 short") && r.contains("2 tiny")),
+            "{rows:?}"
+        );
+        for _ in 0..100 {
             s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('l'));
         }
-        assert_eq!(s.active_lines(), Some((0, 0)), "l at the end never wraps");
+        assert_eq!(s.active_lines(), Some((0, 0)), "l never leaves the row");
         let (rows, _) = draw(&mut s, &files, 6);
-        assert_eq!(count(&rows, "END"), 2, "both sides scrolled: {rows:?}");
-        assert_eq!(count(&rows, "1  x"), 0, "{rows:?}");
+        assert!(
+            rows.iter().any(|r| r.matches("1 D").count() == 2),
+            "stops at the widest row's last column: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("2  ") && !r.contains("short") && !r.contains("tiny")),
+            "shorter rows show only the gutter: {rows:?}"
+        );
         s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
         assert_eq!(s.active_lines(), Some((1, 1)));
         let (rows, _) = draw(&mut s, &files, 6);
         assert!(
-            rows.iter().any(|r| r.contains("2 t")),
-            "clamped to the last character, the shorter facing line scrolled out: {rows:?}"
+            rows.iter().any(|r| r.matches("1 D").count() == 2),
+            "vertical move keeps the scroll: {rows:?}"
         );
-        for _ in 0..10 {
+        for _ in 0..100 {
             s.handle_key(&files, KeyModifiers::NONE, KeyCode::Left);
         }
-        assert_eq!(s.active_lines(), Some((1, 1)), "Left never wraps up");
+        assert_eq!(s.active_lines(), Some((1, 1)), "Left never leaves the row");
         let (rows, _) = draw(&mut s, &files, 6);
         assert!(
             rows.iter()
                 .any(|r| r.contains("2 -short") && r.contains("2 +tiny")),
             "scrolled back: {rows:?}"
         );
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Right);
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('k'));
         s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab);
         s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab);
         assert_eq!(s.focus(), Panel::New);
-        for _ in 0..70 {
+        for _ in 0..100 {
             s.handle_key(&files, KeyModifiers::NONE, KeyCode::Right);
         }
         let (rows, _) = draw(&mut s, &files, 6);
-        assert_eq!(
-            count(&rows, "END"),
-            2,
+        assert!(
+            rows.iter().any(|r| r.matches("1 D").count() == 2),
             "mirrored from the new side: {rows:?}"
         );
     }
