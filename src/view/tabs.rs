@@ -1,14 +1,14 @@
 //! The tab line and the read-only summary each tab shows.
 
-use ferrowl_ui::state::ScrollingTabsState;
-use ferrowl_ui::widgets::ScrollingTabsBuilder;
+use ferrowl_ui::state::VerticalTabsState;
+use ferrowl_ui::widgets::VerticalTabsBuilder;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Margin, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Paragraph, StatefulWidget, Widget};
 
-use crate::config::{Kind, Section, Settings};
+use crate::config::{Section, Settings};
 use crate::view::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,10 +44,9 @@ impl Tab {
         Tab::ALL.iter().position(|t| *t == self).unwrap_or(0)
     }
 
-    /// ` [<index>] <title> [<Kind>] `, `[-]` without settings.
-    pub fn label(self, settings: Option<&Settings>) -> String {
-        let kind = settings.map_or("-", |s| kind_label(self.section(s).kind()));
-        format!(" [{}] {} [{kind}] ", self.index(), self.title())
+    /// `<index> <TITLE>`, written down the tab line.
+    pub fn label(self) -> String {
+        format!("{} {}", self.index(), self.title().to_uppercase())
     }
 
     pub fn section(self, settings: &Settings) -> &dyn Section {
@@ -55,15 +54,6 @@ impl Tab {
             Tab::Board => &settings.board,
             Tab::Remote => &settings.remote,
         }
-    }
-}
-
-/// Capitalised kind name for labels.
-pub fn kind_label(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Github => "GitHub",
-        Kind::Jira => "Jira",
-        Kind::Bitbucket => "Bitbucket",
     }
 }
 
@@ -99,18 +89,20 @@ pub fn summary_lines(
     lines
 }
 
-pub fn render_tab_line(area: Rect, buf: &mut Buffer, active: Tab, settings: Option<&Settings>) {
-    let mut state = ScrollingTabsState {
-        titles: Tab::ALL
-            .iter()
-            .map(|t| t.label(settings))
-            .collect::<Vec<String>>(),
-        selected: Tab::ALL.iter().position(|t| *t == active).unwrap_or(0),
+/// Columns the tab line takes: the character column and one blank column each side.
+pub const TAB_LINE_WIDTH: u16 = 3;
+
+pub fn render_tab_line(area: Rect, buf: &mut Buffer, active: Tab) {
+    let mut state = VerticalTabsState {
+        titles: Tab::ALL.iter().map(|t| t.label()).collect::<Vec<String>>(),
+        active: active.index(),
+        offset: 0,
     };
-    let tabs = ScrollingTabsBuilder::<String>::default()
+    let tabs = VerticalTabsBuilder::<String>::default()
         .style(theme::scrolling_tabs_style())
+        .padding(Margin::new(1, 1))
         .build()
-        .expect("ScrollingTabsBuilder fields all default");
+        .expect("VerticalTabsBuilder fields all default");
     StatefulWidget::render(&tabs, area, buf, &mut state);
 }
 
@@ -156,14 +148,10 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-019 — labels are padded, indexed, and carry the configured kind in brackets, `[-]` without settings.
-    fn ut_tab_labels_show_kind() {
-        let s = settings();
-        assert_eq!(Tab::Board.label(Some(&s)), " [0] Task Board [Jira] ");
-        assert_eq!(Tab::Remote.label(Some(&s)), " [1] Git Remote [GitHub] ");
-        assert_eq!(Tab::Board.label(None), " [0] Task Board [-] ");
-        assert_eq!(Tab::Remote.label(None), " [1] Git Remote [-] ");
-        assert_eq!(kind_label(Kind::Bitbucket), "Bitbucket");
+    /// TU-R-019 — labels are the zero-based index and the title in capitals.
+    fn ut_tab_labels() {
+        assert_eq!(Tab::Board.label(), "0 TASK BOARD");
+        assert_eq!(Tab::Remote.label(), "1 GIT REMOTE");
     }
 
     #[test]
@@ -209,17 +197,42 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-019 — the tab line renders both labels in order.
-    fn ut_tab_line_renders_both_labels() {
-        let s = settings();
-        let rows = crate::testkit::render_rows(60, 1, |f| {
-            render_tab_line(f.area(), f.buffer_mut(), Tab::Remote, Some(&s));
+    /// TU-R-019, TU-E-044 — the tab line stacks both labels one character per row in the middle column with blank columns beside, the active one in the selected style; a short area scrolls to the active tab.
+    fn ut_tab_line_stacks_labels() {
+        let buf = crate::testkit::render_buffer(TAB_LINE_WIDTH, 40, |f| {
+            render_tab_line(f.area(), f.buffer_mut(), Tab::Remote);
         });
-        let board = rows[0].find("[0] Task Board [Jira]").expect("board label");
-        let remote = rows[0]
-            .find("[1] Git Remote [GitHub]")
-            .expect("remote label");
-        assert!(board < remote);
+        let column = crate::testkit::buffer_column(&buf, 1);
+        let board = column.find("0 TASK BOARD").expect("board label");
+        let remote = column.find("1 GIT REMOTE").expect("remote label");
+        assert!(board < remote, "{column:?}");
+        assert!(
+            crate::testkit::buffer_column(&buf, 0).is_empty()
+                && crate::testkit::buffer_column(&buf, 2).is_empty(),
+            "blank side columns"
+        );
+        let style = theme::scrolling_tabs_style();
+        assert_eq!(
+            buf[(1, board as u16)].fg,
+            style.general.fg.expect("general fg")
+        );
+        assert_eq!(
+            buf[(1, remote as u16)].fg,
+            style.selected.fg.expect("selected fg")
+        );
+        assert_ne!(
+            buf[(1, board as u16)].bg,
+            buf[(1, remote as u16)].bg,
+            "active block stands out"
+        );
+        let buf = crate::testkit::render_buffer(TAB_LINE_WIDTH, 8, |f| {
+            render_tab_line(f.area(), f.buffer_mut(), Tab::Remote);
+        });
+        let column = crate::testkit::buffer_column(&buf, 1);
+        assert!(
+            column.contains("GIT REM") || column.contains("1 GIT"),
+            "scrolled to the active tab: {column:?}"
+        );
     }
 
     #[test]

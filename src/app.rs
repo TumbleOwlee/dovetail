@@ -484,19 +484,18 @@ impl App {
 
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        let [top, middle, bottom] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .areas(area);
+        let [upper, bottom] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+        let [top, middle] =
+            Layout::horizontal([Constraint::Length(tabs::TAB_LINE_WIDTH), Constraint::Min(1)])
+                .areas(upper);
         let present = self
             .settings
             .as_ref()
             .is_some_and(|s| self.credentials_present(self.active_tab.section(s)));
         let lines = tabs::summary_lines(self.active_tab, self.settings.as_ref(), present);
         let buf = frame.buffer_mut();
-        tabs::render_tab_line(top, buf, self.active_tab, self.settings.as_ref());
+        tabs::render_tab_line(top, buf, self.active_tab);
         match self.active_tab {
             Tab::Board => match &self.board {
                 BoardState::Loaded(view) => view.render(middle, buf),
@@ -1027,8 +1026,17 @@ mod tests {
         let t = TempDir::new("render");
         let mut a = app(&t, Some(settings()));
         command(&mut a, "frob");
-        let rows = render_rows(60, 10, |f| a.render(f));
-        assert!(rows[0].contains("[0] Task Board [GitHub]"), "{}", rows[0]);
+        let buf = crate::testkit::render_buffer(60, 10, |f| a.render(f));
+        let rows = crate::testkit::buffer_rows(&buf);
+        let column = crate::testkit::buffer_column(&buf, 1);
+        assert!(
+            column.contains("0 TASK") || column.contains("TASK B"),
+            "{column:?}"
+        );
+        assert!(
+            !column.contains("frob"),
+            "the tab line ends above the command line"
+        );
         let (row, x) = rows
             .iter()
             .enumerate()
@@ -1044,7 +1052,7 @@ mod tests {
         a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
         key(&mut a, KeyCode::Char('1'));
         let rows = render_rows(60, 10, |f| a.render(f));
-        assert_eq!(rows[1], "kind: github");
+        assert_eq!(&rows[0][3..], "kind: github", "body right of the tab line");
         a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
         key(&mut a, KeyCode::Char('0'));
         key(&mut a, KeyCode::Char(':'));
@@ -1059,7 +1067,9 @@ mod tests {
         let mut a = app(&t, None);
         let rows = render_rows(100, 30, |f| a.render(f));
         let joined = rows.join("\n");
-        assert!(joined.contains("[0] Task Board [-]"), "{joined}");
+        let buf = crate::testkit::render_buffer(100, 30, |f| a.render(f));
+        let column = crate::testkit::buffer_column(&buf, 1);
+        assert!(column.contains("0 TASK BOARD"), "{column:?}");
         assert!(joined.contains("Owner"), "{joined}");
     }
 
@@ -1275,7 +1285,7 @@ mod tests {
         assert!(a.take_fetch_requests().is_empty());
         assert!(matches!(a.board, BoardState::Unavailable));
         let rows = render_rows(60, 6, |f| a.render(f));
-        assert_eq!(rows[1], "kind: jira");
+        assert_eq!(&rows[0][3..], "kind: jira");
         let mut without = settings();
         without.board.set_credentials(None);
         let mut a = app(&t, Some(without));
@@ -1290,8 +1300,8 @@ mod tests {
         let mut a = app(&t, Some(settings()));
         a.handle_message(Message::Board(Ok(loaded_board())));
         let rows = render_rows(60, 12, |f| a.render(f));
-        assert!(rows[1].contains("Todo (2)"), "{}", rows[1]);
-        assert!(rows[4].contains("First"), "{}", rows[4]);
+        assert!(rows[0].contains("Todo (2)"), "{}", rows[0]);
+        assert!(rows[3].contains("First"), "{}", rows[3]);
         key(&mut a, KeyCode::Char('j'));
         match &a.board {
             BoardState::Loaded(view) => assert_eq!(view.selected(), Some((0, 1))),
@@ -1303,15 +1313,16 @@ mod tests {
             .iter()
             .position(|r| r.contains("github: HTTP 403"))
             .expect("error box");
-        assert_eq!(row, 3, "vertically centered: {rows:?}");
+        assert_eq!(row, 2, "vertically centered: {rows:?}");
         let left = rows[row].find('│').expect("border") as i64;
         let width = rows[row].trim_end().chars().count() as i64 - left;
+        let body_left = i64::from(tabs::TAB_LINE_WIDTH);
         assert!(
-            (left - (60 - width) / 2).abs() <= 1,
-            "horizontally centered: {}",
+            (left - body_left - (60 - body_left - width) / 2).abs() <= 1,
+            "horizontally centered in the body: {}",
             rows[row]
         );
-        assert!(rows[2].contains('┌') && rows[4].contains('└'), "{rows:?}");
+        assert!(rows[1].contains('┌') && rows[3].contains('└'), "{rows:?}");
         command(&mut a, "reload");
         let rows = render_rows(60, 7, |f| a.render(f));
         assert!(

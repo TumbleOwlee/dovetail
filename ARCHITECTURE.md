@@ -18,7 +18,7 @@ TUI application, stack: Rust (stable toolchain, pinned via `rust-toolchain.toml`
 | `diff` | Lays a whole file out side by side from its new content and its unified patch: unchanged lines on both sides, removed lines paired with added ones in order, filler rows where a change is uneven | `tui` |
 | `atlassian` | Atlassian REST calls: listing a Jira site's projects | `atlassian` |
 | `command` | `Cmd` parser and the help rows | `tui` |
-| `view::tabs` | Tab line and per-tab summary body | `tui` |
+| `view::tabs` | Vertical tab line at the left and per-tab summary body | `tui` |
 | `view::remote` | Git Remote tab body: the pull request table with one selected row | `tui` |
 | `view::notice` | Centered box for an outstanding request or its failure | `tui` |
 | `view::board` | Task Board tab body: columns of issue cards with labels and assignee badges, one selection, keyboard navigation | `tui` |

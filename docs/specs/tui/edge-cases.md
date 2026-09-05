@@ -73,3 +73,4 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-041** | `h` at the first column, or `l` at the widest row's last column, on a diff side | Nothing moves; the scroll never leaves the row; cites TU-R-075 |
 | **TU-E-042** | A row of a diff side is shorter than the horizontal scroll | The row shows only its gutter until scrolled back; cites TU-R-075 |
 | **TU-E-043** | A markdown body is empty or whitespace only | The card holds only its header lines; the body takes no rows; cites TU-R-077 |
+| **TU-E-044** | The terminal has fewer rows than the stacked tab titles need | The tab line scrolls just far enough to keep the active tab's rows visible; cites TU-R-019 |

@@ -34,8 +34,8 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 
 ## Main view
 
-**TU-R-018** — The main view shall consist of a tab line at the top, the active tab's body filling the middle, and the command line occupying the bottom line.
-**TU-R-019** — The tab line shall list the tabs Task Board and Git Remote in that order, each labelled ` [<index>] <title> [<Kind>] ` with a leading and trailing space and a zero-based index, as in ` [0] Task Board [Jira] `, and with `[-]` when no settings are held.
+**TU-R-018** — The main view shall consist of a vertical tab line at the left, the active tab's body filling the rest of the rows above the command line, and the command line occupying the bottom line.
+**TU-R-019** — The tab line shall stack the tabs Task Board and Git Remote top to bottom, each written one character per row as `<index> <TITLE>` with a zero-based index and the title in capitals, as in `0 TASK BOARD`, with one blank column at each side and one blank row above and below its characters, the tabs sharing the line's height evenly; the active tab's cells are drawn in the selected style, the others in the general style.
 **TU-R-020** — Ctrl+T followed by `l` shall activate the next tab and Ctrl+T followed by `h` the previous, wrapping at both ends.
 **TU-R-021** — Ctrl+T followed by a digit shall activate the tab with that zero-based index.
 **TU-R-022** — The Task Board tab body shall show the board section's kind, each identifier key with its value, the referenced profile name or `none`, and `present` or `missing` for credentials.

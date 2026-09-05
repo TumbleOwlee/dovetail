@@ -70,3 +70,12 @@ pub fn buffer_rows(buf: &ratatui::buffer::Buffer) -> Vec<String> {
         })
         .collect()
 }
+
+/// Column `x` of the buffer top to bottom as one trimmed-right string.
+pub fn buffer_column(buf: &ratatui::buffer::Buffer, x: u16) -> String {
+    (0..buf.area.height)
+        .map(|y| buf[(x, y)].symbol())
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
