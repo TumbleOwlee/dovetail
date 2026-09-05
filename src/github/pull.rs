@@ -10,7 +10,7 @@ use super::timeline::{self, TimelineItem};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
-const QUERY_HEAD: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number title body state isDraft url headRefOid repository { nameWithOwner } author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } } latestReviews(first: 20) { nodes { state author { login } } } assignees(first: 10) { nodes { login } } labels(first: 20) { nodes { name color } } projectItems(first: 10) { nodes { project { title } } } milestone { title } closingIssuesReferences(first: 10) { nodes { id number title } } participants(first: 20) { nodes { login } } commits(first: 100) { nodes { commit { abbreviatedOid messageHeadline committedDate author { name user { login } } } } }";
+const QUERY_HEAD: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id number title body state isDraft url headRefOid repository { nameWithOwner } author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } } latestReviews(first: 20) { nodes { state author { login } } } assignees(first: 10) { nodes { login } } labels(first: 20) { nodes { name color } } projectItems(first: 10) { nodes { project { title } } } milestone { title } closingIssuesReferences(first: 10) { nodes { id number title } } participants(first: 20) { nodes { login } } commits(first: 100) { nodes { commit { abbreviatedOid messageHeadline committedDate author { name user { login } } } } }";
 
 const QUERY_TAIL: &str = " } } }";
 
@@ -33,6 +33,8 @@ pub struct Reviewer {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PullDetails {
+    /// GraphQL node id, the handle for mutations.
+    pub id: String,
     pub number: u64,
     pub title: String,
     pub body: String,
@@ -151,6 +153,7 @@ struct RepoName {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Node {
+    id: String,
     number: u64,
     title: String,
     body: String,
@@ -295,6 +298,7 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
     }));
     Ok(Page {
         details: PullDetails {
+            id: node.id,
             number: node.number,
             title: node.title,
             body: node.body,
@@ -397,7 +401,7 @@ pub async fn load_pull_request(
 mod tests {
     use super::*;
 
-    const BODY: &str = r#"{"data":{"repository":{"pullRequest":{"number":5,"title":"Fix crash","body":"Fixes #7","state":"OPEN","isDraft":false,"url":"https://github.com/o/r/pull/5","headRefOid":"0123abcd","repository":{"nameWithOwner":"o/r"},"author":{"login":"octo"},
+    const BODY: &str = r#"{"data":{"repository":{"pullRequest":{"id":"PR_5","number":5,"title":"Fix crash","body":"Fixes #7","state":"OPEN","isDraft":false,"url":"https://github.com/o/r/pull/5","headRefOid":"0123abcd","repository":{"nameWithOwner":"o/r"},"author":{"login":"octo"},
         "reviewRequests":{"nodes":[{"requestedReviewer":{"__typename":"User","login":"rev"}},{"requestedReviewer":{"__typename":"Team","name":"core"}},{"requestedReviewer":null}]},
         "latestReviews":{"nodes":[{"state":"APPROVED","author":{"login":"a"}},{"state":"CHANGES_REQUESTED","author":null}]},
         "assignees":{"nodes":[{"login":"b"}]},"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},
@@ -421,7 +425,7 @@ mod tests {
         let query = body["query"].as_str().expect("query");
         for part in [
             "pullRequest(number: $number)",
-            "number title body state isDraft url headRefOid repository { nameWithOwner } author { login }",
+            "id number title body state isDraft url headRefOid repository { nameWithOwner } author { login }",
             "reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } }",
             "latestReviews(first: 20) { nodes { state author { login } } }",
             "assignees(first: 10) { nodes { login } }",
@@ -453,6 +457,7 @@ mod tests {
         assert_eq!((d.state, d.draft), (PullState::Open, false));
         assert_eq!(d.url, "https://github.com/o/r/pull/5");
         assert_eq!(d.head_oid, "0123abcd");
+        assert_eq!(d.id, "PR_5");
         assert_eq!(d.repository, "o/r");
         assert_eq!(d.author.as_deref(), Some("octo"));
         assert_eq!(d.timeline.len(), 2);
