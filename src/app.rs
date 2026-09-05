@@ -446,8 +446,8 @@ impl App {
         }
         if std::mem::take(&mut self.tab_prefix) {
             match code {
-                KeyCode::Char('l') => self.active_tab = self.active_tab.next(),
-                KeyCode::Char('h') => self.active_tab = self.active_tab.previous(),
+                KeyCode::Char('j') => self.active_tab = self.active_tab.next(),
+                KeyCode::Char('k') => self.active_tab = self.active_tab.previous(),
                 KeyCode::Char(c) => {
                     if let Some(tab) = c.to_digit(10).and_then(|n| Tab::ALL.get(n as usize)) {
                         self.active_tab = *tab;
@@ -755,21 +755,24 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-020, TU-R-021 — Ctrl+T then l/h or a digit switches tabs; bare keys do nothing.
+    /// TU-R-020, TU-R-021 — Ctrl+T then j/k or a digit switches tabs; bare keys and the old h/l do nothing.
     fn ut_tab_keys_switch_tabs() {
         let t = TempDir::new("tabs");
         let mut a = app(&t, Some(settings()));
         let ctrl_t = |a: &mut App| a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
         assert_eq!(a.active_tab, Tab::Board);
         ctrl_t(&mut a);
-        key(&mut a, KeyCode::Char('l'));
+        key(&mut a, KeyCode::Char('j'));
         assert_eq!(a.active_tab, Tab::Remote);
         ctrl_t(&mut a);
-        key(&mut a, KeyCode::Char('l'));
+        key(&mut a, KeyCode::Char('j'));
         assert_eq!(a.active_tab, Tab::Board);
         ctrl_t(&mut a);
-        key(&mut a, KeyCode::Char('h'));
+        key(&mut a, KeyCode::Char('k'));
         assert_eq!(a.active_tab, Tab::Remote);
+        ctrl_t(&mut a);
+        key(&mut a, KeyCode::Char('l'));
+        assert_eq!(a.active_tab, Tab::Remote, "l no longer switches");
         ctrl_t(&mut a);
         key(&mut a, KeyCode::Char('0'));
         assert_eq!(a.active_tab, Tab::Board);
@@ -780,7 +783,7 @@ mod tests {
             KeyCode::Tab,
             KeyCode::BackTab,
             KeyCode::Char('0'),
-            KeyCode::Char('h'),
+            KeyCode::Char('k'),
         ] {
             key(&mut a, code);
             assert_eq!(
@@ -798,12 +801,12 @@ mod tests {
         let mut a = app(&t, Some(settings()));
         a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
         key(&mut a, KeyCode::Char('x'));
-        key(&mut a, KeyCode::Char('l'));
+        key(&mut a, KeyCode::Char('j'));
         assert_eq!(a.active_tab, Tab::Board);
         a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
         key(&mut a, KeyCode::Char('9'));
         assert_eq!(a.active_tab, Tab::Board);
-        key(&mut a, KeyCode::Char('l'));
+        key(&mut a, KeyCode::Char('j'));
         assert_eq!(a.active_tab, Tab::Board);
         // The prefix does not swallow the command line either: `:` after a foreign key opens it.
         a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
@@ -1030,7 +1033,7 @@ mod tests {
         let rows = crate::testkit::buffer_rows(&buf);
         let column = crate::testkit::buffer_column(&buf, 1);
         assert!(
-            column.contains("0 TASK") || column.contains("TASK B"),
+            column.contains("BOARD") || column.contains("OARD"),
             "{column:?}"
         );
         assert!(
@@ -1069,7 +1072,7 @@ mod tests {
         let joined = rows.join("\n");
         let buf = crate::testkit::render_buffer(100, 30, |f| a.render(f));
         let column = crate::testkit::buffer_column(&buf, 1);
-        assert!(column.contains("0 TASK BOARD"), "{column:?}");
+        assert!(column.contains("BOARD"), "{column:?}");
         assert!(joined.contains("Owner"), "{joined}");
     }
 

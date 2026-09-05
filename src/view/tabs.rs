@@ -20,13 +20,6 @@ pub enum Tab {
 impl Tab {
     pub const ALL: [Tab; 2] = [Tab::Board, Tab::Remote];
 
-    pub fn title(self) -> &'static str {
-        match self {
-            Tab::Board => "Task Board",
-            Tab::Remote => "Git Remote",
-        }
-    }
-
     /// Wraps at both ends.
     pub fn next(self) -> Tab {
         let i = Tab::ALL.iter().position(|t| *t == self).unwrap_or(0);
@@ -44,9 +37,12 @@ impl Tab {
         Tab::ALL.iter().position(|t| *t == self).unwrap_or(0)
     }
 
-    /// `<index> <TITLE>`, written down the tab line.
-    pub fn label(self) -> String {
-        format!("{} {}", self.index(), self.title().to_uppercase())
+    /// The tab line's caption, written down the line.
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Board => "BOARD",
+            Tab::Remote => "REPOSITORY",
+        }
     }
 
     pub fn section(self, settings: &Settings) -> &dyn Section {
@@ -94,7 +90,7 @@ pub const TAB_LINE_WIDTH: u16 = 3;
 
 pub fn render_tab_line(area: Rect, buf: &mut Buffer, active: Tab) {
     let mut state = VerticalTabsState {
-        titles: Tab::ALL.iter().map(|t| t.label()).collect::<Vec<String>>(),
+        titles: Tab::ALL.iter().map(|t| t.label().to_string()).collect(),
         active: active.index(),
         offset: 0,
     };
@@ -148,10 +144,10 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-019 — labels are the zero-based index and the title in capitals.
+    /// TU-R-019 — the captions are `BOARD` and `REPOSITORY`.
     fn ut_tab_labels() {
-        assert_eq!(Tab::Board.label(), "0 TASK BOARD");
-        assert_eq!(Tab::Remote.label(), "1 GIT REMOTE");
+        assert_eq!(Tab::Board.label(), "BOARD");
+        assert_eq!(Tab::Remote.label(), "REPOSITORY");
     }
 
     #[test]
@@ -203,8 +199,8 @@ mod tests {
             render_tab_line(f.area(), f.buffer_mut(), Tab::Remote);
         });
         let column = crate::testkit::buffer_column(&buf, 1);
-        let board = column.find("0 TASK BOARD").expect("board label");
-        let remote = column.find("1 GIT REMOTE").expect("remote label");
+        let board = column.find("BOARD").expect("board label");
+        let remote = column.find("REPOSITORY").expect("remote label");
         assert!(board < remote, "{column:?}");
         assert!(
             crate::testkit::buffer_column(&buf, 0).is_empty()
@@ -230,7 +226,7 @@ mod tests {
         });
         let column = crate::testkit::buffer_column(&buf, 1);
         assert!(
-            column.contains("GIT REM") || column.contains("1 GIT"),
+            column.contains("REPOS") || column.contains("SITORY"),
             "scrolled to the active tab: {column:?}"
         );
     }

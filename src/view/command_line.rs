@@ -18,7 +18,7 @@ use crate::view::theme;
 
 type Input = Widget<InputFieldState, InputField<String>>;
 
-const HINT: &str = ":  command  |  C-t+h C-t+l  tabs";
+const HINT: &str = ":  command  |  C-t+j C-t+k  tabs";
 const HELP_WIDTH: u16 = 62;
 const USAGE_COLUMN: usize = 12;
 
@@ -256,7 +256,7 @@ mod tests {
         assert_eq!(rows[0], "unknown command: x");
         cl.clear_error();
         let rows = crate::testkit::render_rows(60, 1, |f| cl.render(f.area(), f.buffer_mut()));
-        assert_eq!(rows[0].trim(), ":  command  |  C-t+h C-t+l  tabs");
+        assert_eq!(rows[0].trim(), ":  command  |  C-t+j C-t+k  tabs");
     }
 
     #[test]
