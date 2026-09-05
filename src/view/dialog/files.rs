@@ -102,6 +102,8 @@ pub struct FilesState {
     sides: Sides,
     /// A path whose content the caller has yet to request.
     request: Option<String>,
+    /// Rows and text columns a diff side showed at the last draw; a page before that is one row.
+    view: (usize, usize),
 }
 
 impl FilesState {
@@ -114,6 +116,7 @@ impl FilesState {
             blobs: HashMap::new(),
             sides: Sides::Empty,
             request: None,
+            view: (1, 0),
         };
         state.refresh(files);
         state
@@ -204,28 +207,60 @@ impl FilesState {
                 } else {
                     (new, old)
                 };
-                let step: isize = match code {
-                    KeyCode::Char('h') | KeyCode::Left => -1,
-                    KeyCode::Char('l') | KeyCode::Right => 1,
-                    _ => 0,
+                let (rows, columns) = self.view;
+                let last = focused.lines().len().saturating_sub(1);
+                let widest = focused
+                    .lines()
+                    .iter()
+                    .map(|l| l.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_sub(1);
+                let active_len = focused
+                    .lines()
+                    .get(focused.active_line())
+                    .map_or(0, |l| l.chars().count());
+                let line_step: Option<isize> = match (modifiers, code) {
+                    (_, KeyCode::PageDown) => Some(rows as isize),
+                    (_, KeyCode::PageUp) => Some(-(rows as isize)),
+                    (KeyModifiers::CONTROL, KeyCode::Char('d')) => Some((rows / 2).max(1) as isize),
+                    (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+                        Some(-((rows / 2).max(1) as isize))
+                    }
+                    _ => None,
                 };
-                if step == 0 {
-                    let code = match code {
-                        KeyCode::Char('j') => KeyCode::Down,
-                        KeyCode::Char('k') => KeyCode::Up,
-                        other => other,
-                    };
-                    focused.handle_events(modifiers, code);
-                } else {
-                    let widest = focused
-                        .lines()
-                        .iter()
-                        .map(|l| l.chars().count())
-                        .max()
-                        .unwrap_or(0)
-                        .saturating_sub(1);
-                    let scroll = (focused.h_scroll() as isize + step).clamp(0, widest as isize);
-                    focused.set_h_scroll(scroll as usize);
+                match (modifiers, code) {
+                    (_, KeyCode::Char('h') | KeyCode::Left) => {
+                        focused.set_h_scroll(focused.h_scroll().saturating_sub(1));
+                    }
+                    (_, KeyCode::Char('l') | KeyCode::Right) => {
+                        focused.set_h_scroll((focused.h_scroll() + 1).min(widest));
+                    }
+                    (_, KeyCode::Char('0')) => {
+                        focused.set_h_scroll(0);
+                    }
+                    (_, KeyCode::Char('$')) => {
+                        focused.set_h_scroll(active_len.saturating_sub(columns).min(widest));
+                    }
+                    (_, KeyCode::Char('g')) => {
+                        focused.set_active_line(0);
+                    }
+                    (_, KeyCode::Char('G')) => {
+                        focused.set_active_line(last);
+                    }
+                    _ if line_step.is_some() => {
+                        let step = line_step.unwrap_or(0);
+                        let line = (focused.active_line() as isize + step).clamp(0, last as isize);
+                        focused.set_active_line(line as usize);
+                    }
+                    _ => {
+                        let code = match code {
+                            KeyCode::Char('j') => KeyCode::Down,
+                            KeyCode::Char('k') => KeyCode::Up,
+                            other => other,
+                        };
+                        focused.handle_events(modifiers, code);
+                    }
                 }
                 // No cursor is drawn on a read-only side, so the column only serves the
                 // field's follow-the-cursor logic: parked on the scroll it keeps the view put.
@@ -323,6 +358,18 @@ impl FilesState {
                 let Fields { old, new } = fields.as_mut();
                 let old_widget = code_field(&old_title);
                 let new_widget = code_field(&new_title);
+                let gutter = old
+                    .gutter_labels()
+                    .iter()
+                    .flatten()
+                    .map(|l| l.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                self.view = (
+                    old_area.height.saturating_sub(2).max(1) as usize,
+                    (old_area.width.saturating_sub(4) as usize).saturating_sub(gutter),
+                );
                 // The focused side settles its scroll while rendering; the other side then
                 // mirrors it so the same row faces on both sides.
                 if self.focus == Panel::New {
@@ -756,6 +803,71 @@ mod tests {
             rows.iter().any(|r| r.matches("1 D").count() == 2),
             "mirrored from the new side: {rows:?}"
         );
+    }
+
+    #[test]
+    /// TU-R-075, TU-E-045 — on a focused side PageDown/PageUp move a page, Ctrl+D/Ctrl+U half a page, g/G the top and bottom, 0/$ the start and end of the active line, everything clamped and mirrored; before the tab was drawn a page is one row.
+    fn ut_side_paging_and_jumps() {
+        let long = "x".repeat(60);
+        let content: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        let patch = format!("@@ -1,2 +1,2 @@\n line 1\n-old {long}END\n+line 2\n");
+        let files = vec![file("a.rs", FileStatus::Modified, Some(&patch))];
+        let mut s = FilesState::new(&files);
+        s.take_request();
+        s.handle_blob(&files, "a.rs", text(&content));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::PageDown);
+        assert_eq!(
+            s.active_lines(),
+            Some((1, 1)),
+            "one row before the first draw"
+        );
+        draw(&mut s, &files, 12);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::PageDown);
+        assert_eq!(
+            s.active_lines(),
+            Some((11, 11)),
+            "a page is the panel's inner height"
+        );
+        s.handle_key(&files, KeyModifiers::CONTROL, KeyCode::Char('d'));
+        assert_eq!(s.active_lines(), Some((16, 16)));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::PageDown);
+        assert_eq!(s.active_lines(), Some((19, 19)), "clamped at the last row");
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::PageUp);
+        assert_eq!(s.active_lines(), Some((9, 9)));
+        s.handle_key(&files, KeyModifiers::CONTROL, KeyCode::Char('u'));
+        assert_eq!(s.active_lines(), Some((4, 4)));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::PageUp);
+        assert_eq!(s.active_lines(), Some((0, 0)), "clamped at the first row");
+        s.handle_key(&files, KeyModifiers::SHIFT, KeyCode::Char('G'));
+        assert_eq!(s.active_lines(), Some((19, 19)));
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert!(
+            rows.iter().any(|r| r.contains("line 20")),
+            "scrolled to the bottom: {rows:?}"
+        );
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('g'));
+        assert_eq!(s.active_lines(), Some((0, 0)));
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert!(
+            rows.iter().any(|r| r.contains("line 1")),
+            "back at the top: {rows:?}"
+        );
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        s.handle_key(&files, KeyModifiers::SHIFT, KeyCode::Char('$'));
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert_eq!(
+            count(&rows, "END"),
+            1,
+            "end of the old side's active line: {rows:?}"
+        );
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('0'));
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert!(
+            rows.iter().any(|r| r.contains("-old xxx")),
+            "start of line: {rows:?}"
+        );
+        assert_eq!(count(&rows, "END"), 0, "{rows:?}");
     }
 
     #[test]
