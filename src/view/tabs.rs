@@ -89,9 +89,19 @@ pub fn summary_lines(
 pub const TAB_LINE_WIDTH: u16 = 3;
 
 pub fn render_tab_line(area: Rect, buf: &mut Buffer, active: Tab) {
+    render_vertical_tabs(
+        area,
+        buf,
+        Tab::ALL.iter().map(|t| t.label().to_string()).collect(),
+        active.index(),
+    );
+}
+
+/// The captions stacked down `area` in the scheme's tab style, `active` selected.
+pub fn render_vertical_tabs(area: Rect, buf: &mut Buffer, titles: Vec<String>, active: usize) {
     let mut state = VerticalTabsState {
-        titles: Tab::ALL.iter().map(|t| t.label().to_string()).collect(),
-        active: active.index(),
+        titles,
+        active,
         offset: 0,
     };
     let tabs = VerticalTabsBuilder::<String>::default()

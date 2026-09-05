@@ -24,7 +24,7 @@ TUI application, stack: Rust (stable toolchain, pinned via `rust-toolchain.toml`
 | `view::board` | Task Board tab body: columns of issue cards with labels and assignee badges, one selection, keyboard navigation | `tui` |
 | `view::command_line` | The `:` prompt, the help box above it while open, and the hint bar, error or notice shown while closed | `tui` |
 | `view::dialog::config` | The configuration dialog: kind selections, per-kind fields, validation, forms | `tui` |
-| `view::dialog::details` | The details overlay shared by issues and pull requests: description card and one box per timeline item scrolled together, markdown bodies drawn by ferrowl's markdown widget, a fixed-width bar of focusable boxes at the right, loading and failure states; for pull requests a tab line switching between the conversation, the commits list and the changed files | `tui` |
+| `view::dialog::details` | The details overlay shared by issues and pull requests: description card and one box per timeline item scrolled together, markdown bodies drawn by ferrowl's markdown widget, a fixed-width bar of focusable boxes at the right, loading and failure states; for pull requests a vertical tab line at the left switching between the conversation, the commits list and the changed files | `tui` |
 | `view::dialog::commits` | The `Commits` tab: a table of the commits with a selection | `tui` |
 | `view::dialog::files` | The `Files Changed` tab: file tree panel, the selected file's old and new state as two read-only code fields with mirrored vertical and horizontal navigation, lazily requested and cached file contents | `tui` |
 | `view::dialog::issue` | Maps an issue to overlay content: its seven bar boxes | `tui` |

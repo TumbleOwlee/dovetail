@@ -4,9 +4,8 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use ferrowl_ui::state::{
     CodeInputFieldStateBuilder, MarkdownInputFieldState, MarkdownInputFieldStateBuilder,
-    ScrollingTabsState,
 };
-use ferrowl_ui::widgets::{MarkdownInputField, MarkdownInputFieldBuilder, ScrollingTabsBuilder};
+use ferrowl_ui::widgets::{MarkdownInputField, MarkdownInputFieldBuilder};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, HorizontalAlignment, Layout, Margin, Rect};
 use ratatui::style::{Color, Style};
@@ -20,7 +19,7 @@ use crate::github::pull::{Commit, ReviewState};
 use crate::github::timeline::{Event, TimelineItem};
 use crate::view::board::{badge_text_color, label_color};
 use crate::view::dialog::{commits::CommitsView, files::FilesState};
-use crate::view::{notice, theme};
+use crate::view::{notice, tabs, theme};
 
 /// Screen cells left free around the overlay on each side.
 const INSET: Margin = Margin::new(4, 3);
@@ -129,11 +128,12 @@ impl DetailsTab {
         DetailsTab::ALL[(self.index() + DetailsTab::ALL.len() - 1) % DetailsTab::ALL.len()]
     }
 
-    fn title(self) -> &'static str {
+    /// The tab line's caption, written down the line.
+    fn label(self) -> &'static str {
         match self {
-            DetailsTab::Conversation => "Conversation",
-            DetailsTab::Commits => "Commits",
-            DetailsTab::Files => "Files Changed",
+            DetailsTab::Conversation => "CONVERSATION",
+            DetailsTab::Commits => "COMMITS",
+            DetailsTab::Files => "FILES",
         }
     }
 }
@@ -271,8 +271,8 @@ impl DetailsDialog {
         if std::mem::take(prefix) {
             if matches!(content.panes, Panes::Pull { .. }) {
                 match code {
-                    KeyCode::Char('l') => *tab = tab.next(),
-                    KeyCode::Char('h') => *tab = tab.previous(),
+                    KeyCode::Char('j') => *tab = tab.next(),
+                    KeyCode::Char('k') => *tab = tab.previous(),
                     KeyCode::Char(c) => {
                         if let Some(t) =
                             c.to_digit(10).and_then(|n| DetailsTab::ALL.get(n as usize))
@@ -352,10 +352,20 @@ impl DetailsDialog {
                 let body = match &content.panes {
                     Panes::Conversation => inner,
                     Panes::Pull { .. } => {
-                        let [line, body] =
-                            Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
-                                .areas(inner);
-                        render_tab_line(line, buf, *tab);
+                        let [line, body] = Layout::horizontal([
+                            Constraint::Length(tabs::TAB_LINE_WIDTH),
+                            Constraint::Min(0),
+                        ])
+                        .areas(inner);
+                        tabs::render_vertical_tabs(
+                            line,
+                            buf,
+                            DetailsTab::ALL
+                                .iter()
+                                .map(|t| t.label().to_string())
+                                .collect(),
+                            tab.index(),
+                        );
                         body
                     }
                 };
@@ -380,21 +390,6 @@ impl DetailsDialog {
 }
 
 /// ` [<index>] <title> ` per tab, the active one selected.
-fn render_tab_line(area: Rect, buf: &mut Buffer, active: DetailsTab) {
-    let mut state = ScrollingTabsState {
-        titles: DetailsTab::ALL
-            .iter()
-            .map(|t| format!(" [{}] {} ", t.index(), t.title()))
-            .collect::<Vec<String>>(),
-        selected: active.index(),
-    };
-    let tabs = ScrollingTabsBuilder::<String>::default()
-        .style(theme::scrolling_tabs_style())
-        .build()
-        .expect("ScrollingTabsBuilder fields all default");
-    StatefulWidget::render(&tabs, area, buf, &mut state);
-}
-
 /// A bordered card's text: title line, then its lines.
 struct CardText {
     title: String,
@@ -1014,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-072, TU-E-034 — a pull request overlay shows the tab line and Ctrl+T then l/h/digit switches its tab; an issue overlay shows none and Ctrl+T does nothing.
+    /// TU-R-072, TU-E-034 — a pull request overlay shows the vertical tab line at its left and Ctrl+T then j/k/digit switches its tab; an issue overlay shows none and Ctrl+T does nothing.
     fn ut_pull_tabs() {
         let ctrl_t =
             |d: &mut DetailsDialog| d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
@@ -1040,12 +1035,17 @@ mod tests {
             head_oid: "abc".into(),
         };
         d.set_result(Ok::<_, String>(c));
-        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        let buf = render_buffer(100, 40, |f| d.render(f.area(), f.buffer_mut()));
+        let rows = crate::testkit::buffer_rows(&buf);
+        let column = crate::testkit::buffer_column(&buf, 7);
+        let conversation = column.find("CONVERSATION").expect("caption");
+        let commits = column.find("COMMITS").expect("caption");
+        let files = column.find("FILES").expect("caption");
+        assert!(conversation < commits && commits < files, "{column:?}");
         assert!(
-            rows[4].contains("[0] Conversation")
-                && rows[4].contains("[1] Commits")
-                && rows[4].contains("[2] Files Changed"),
-            "{rows:?}"
+            !rows[4].contains("Conversation"),
+            "no horizontal tab line: {}",
+            rows[4]
         );
         assert!(rows.iter().any(|r| r.contains(" Reviewers ")), "{rows:?}");
         assert_eq!(ctrl_t(&mut d), DetailsEvent::Consumed);
@@ -1066,7 +1066,7 @@ mod tests {
         );
         assert!(!rows.iter().any(|r| r.contains(" Reviewers ")), "{rows:?}");
         ctrl_t(&mut d);
-        d.handle_key(KeyModifiers::NONE, KeyCode::Char('l'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('j'));
         let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
         assert!(
             rows.iter()
@@ -1095,14 +1095,14 @@ mod tests {
             "Tab moves the panel focus, not the bar's"
         );
         ctrl_t(&mut d);
-        d.handle_key(KeyModifiers::NONE, KeyCode::Char('l'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('j'));
         let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
         assert!(
             rows.iter().any(|r| r.contains(" Reviewers ")),
             "wrapped to Conversation: {rows:?}"
         );
         ctrl_t(&mut d);
-        d.handle_key(KeyModifiers::NONE, KeyCode::Char('h'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('k'));
         let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
         assert!(
             rows.iter().any(|r| r.contains(" Files ")),
