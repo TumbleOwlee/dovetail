@@ -76,11 +76,11 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-048** | Enter on the commit table with no commits | Nothing happens; the table stays; cites TU-R-078 |
 | **TU-E-049** | A file content response arrives | It is matched by commit id and path: the head commit's go to the `Files Changed` tab, an open or cached commit diff's to that commit, any other is discarded; cites TU-R-076, TU-R-078 |
 | **TU-E-050** | A commit file list arrives for a commit never requested, or after the overlay closed | Discarded; cites TU-R-078 |
-| **TU-E-051** | `submit` with a missing or unknown verdict | `usage: submit approve\|changes\|comment [summary]` in the status line; nothing is sent; cites TU-R-084 |
-| **TU-E-052** | `submit` or `discard` while review mode is inactive, or `c`/`r` outside review mode | `no review: run :review` in the status line; nothing changes; cites TU-R-080, TU-R-082, TU-R-083 |
-| **TU-E-053** | `c` while the diff shows a notice, or on rows with no file line on either side | `no line to comment` in the status line; no draft is created; cites TU-R-082 |
-| **TU-E-054** | `submit` or `discard` while a submit request runs, or `c`/`r` while it runs | `review busy` in the status line; nothing changes; cites TU-R-084 |
+| **TU-E-051** | `submit` with a missing or unknown verdict | `usage: submit approve\|changes\|comment [summary]` in the message popup; nothing is sent; cites TU-R-084 |
+| **TU-E-052** | `submit` or `discard` while review mode is inactive, or `c`/`r` outside review mode | `no review: run :review` in the message popup; nothing changes; cites TU-R-080, TU-R-082, TU-R-083 |
+| **TU-E-053** | `c` while the diff shows a notice, or on rows with no file line on either side | `no line to comment` in the message popup; no draft is created; cites TU-R-082 |
+| **TU-E-054** | `submit` or `discard` while a submit request runs, or `c`/`r` while it runs | `review busy` in the message popup; nothing changes; cites TU-R-084 |
 | **TU-E-055** | The overlay closes while review mode is active | Local drafts, pending replies and a held review id are dropped; a review created on GitHub stays there; cites TU-R-084 |
-| **TU-E-056** | `review` while review mode is already active | `review already started` in the status line; cites TU-R-080 |
+| **TU-E-056** | `review` while review mode is already active | `review already started` in the message popup; cites TU-R-080 |
 | **TU-E-057** | `submit` with no local drafts and no pending replies | Allowed: the review submits with the verdict and summary alone; cites TU-R-084 |
-| **TU-E-058** | An unknown command in the overlay command line | `unknown command: <input>` in the status line; cites TU-R-079 |
+| **TU-E-058** | An unknown command in the overlay command line | `unknown command: <input>` in the message popup; cites TU-R-079 |

@@ -323,6 +323,14 @@ impl DetailsDialog {
     }
 
     pub fn handle_key(&mut self, modifiers: KeyModifiers, code: KeyCode) -> DetailsEvent {
+        // An open message popup swallows the next key, whatever it is.
+        if let Content::Loaded { files, .. } = &mut self.content
+            && let Some(review) = files.review_mut()
+            && review.notice().is_some()
+        {
+            review.clear_notice();
+            return DetailsEvent::Consumed;
+        }
         let armed = matches!(self.content, Content::Loaded { prefix: true, .. });
         // The overlay's own command line eats every key while open.
         if let Content::Loaded {
@@ -481,7 +489,6 @@ impl DetailsDialog {
                     review.set_notice("review already started");
                 } else {
                     review.active = true;
-                    review.set_notice("review started");
                 }
                 DetailsEvent::Consumed
             }
@@ -507,7 +514,6 @@ impl DetailsDialog {
                 review.save_editor();
                 let (threads, replies) = review.pending();
                 review.submitting = true;
-                review.set_notice("submitting review..");
                 let action = ReviewAction::Submit {
                     pull_id: pull_id.clone(),
                     head_oid: head_oid.clone(),
@@ -531,7 +537,6 @@ impl DetailsDialog {
                 }
                 review.clear_local();
                 review.active = false;
-                review.set_notice("review discarded");
                 let held = review.review_id.take();
                 files.sync_marks_for(changed);
                 match held {
@@ -564,7 +569,6 @@ impl DetailsDialog {
                 review.clear_local();
                 review.active = false;
                 review.review_id = None;
-                review.set_notice("review submitted");
             }
             // Discarding already ended review mode locally; a failure below only reports.
             Ok(ReviewOutcome::Discarded) => {}
@@ -605,41 +609,28 @@ impl DetailsDialog {
                 ..
             } => {
                 // The bottom row becomes the review status line while review mode is
-                // active or a notice stands.
-                let status = files
-                    .review()
-                    .map(|r| (r.active, r.notice().map(str::to_string)));
-                let inner = match &status {
-                    Some((active, notice)) if *active || notice.is_some() => {
+                // active: only the state, its label centered on the purple fill.
+                let status = files.review().filter(|r| r.active).map(|r| {
+                    if r.submitting {
+                        " SUBMITTING "
+                    } else {
+                        " REVIEW "
+                    }
+                });
+                let inner = match status {
+                    Some(label) => {
                         let [rest, line] =
                             Layout::vertical([Constraint::Min(0), Constraint::Length(1)])
                                 .areas(inner);
-                        let mut x = line.x;
-                        let style = if *active {
-                            // The purple fills the whole row while review mode is on.
-                            let purple = Style::default()
-                                .fg(theme::TEMPLATE.text_hi)
-                                .bg(theme::TEMPLATE.review);
-                            buf.set_style(line, purple);
-                            let label = " REVIEW ";
-                            buf.set_stringn(x, line.y, label, line.width as usize, purple.bold());
-                            x += label.len() as u16 + 1;
-                            purple
-                        } else {
-                            theme::base()
-                        };
-                        if let Some(notice) = notice {
-                            buf.set_stringn(
-                                x,
-                                line.y,
-                                notice,
-                                line.right().saturating_sub(x) as usize,
-                                style,
-                            );
-                        }
+                        let purple = Style::default()
+                            .fg(theme::TEMPLATE.text_hi)
+                            .bg(theme::TEMPLATE.review);
+                        buf.set_style(line, purple);
+                        let x = line.x + line.width.saturating_sub(label.len() as u16) / 2;
+                        buf.set_stringn(x, line.y, label, line.width as usize, purple.bold());
                         rest
                     }
-                    _ => inner,
+                    None => inner,
                 };
                 let body = match &content.panes {
                     Panes::Conversation => inner,
@@ -678,6 +669,9 @@ impl DetailsDialog {
                         render_cards(content, number, scroll, left, buf);
                         render_bar(&content.boxes, *focus, *cursor, bar, buf);
                     }
+                }
+                if let Some(notice) = files.review().and_then(|r| r.notice()) {
+                    render_message_popup(notice, inner, buf);
                 }
             }
         }
@@ -771,6 +765,30 @@ fn markdown_rows(body: &str, width: u16) -> u16 {
 
 /// The boxes stacked top to bottom, each as tall as its entries, cut at the bottom; the focused
 /// box's cursor entry, when it opens something, on the highlight background.
+/// A review message in a centered bordered popup; the caller dismisses it on the next
+/// key.
+fn render_message_popup(message: &str, area: Rect, buf: &mut Buffer) {
+    let width = (message.chars().count() as u16 + 4).clamp(20, area.width.min(64));
+    let text_width = width.saturating_sub(2).max(1);
+    let rows = (message.chars().count() as u16).div_ceil(text_width).max(1);
+    let height = (rows + 2).min(area.height);
+    let panel = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width: width.min(area.width),
+        height,
+    };
+    Clear.render(panel, buf);
+    let block = Block::bordered().style(theme::on_bg(theme::TEMPLATE.warning));
+    let inner = block.inner(panel);
+    block.render(panel, buf);
+    Paragraph::new(message)
+        .style(theme::base())
+        .wrap(ratatui::widgets::Wrap { trim: true })
+        .centered()
+        .render(inner, buf);
+}
+
 /// The overlay's own command line: a centered bordered panel over the `Files Changed`
 /// tab body; the widget draws its help box above the panel.
 fn render_command_panel(command: &mut CommandLineState, area: Rect, buf: &mut Buffer) {
@@ -1997,6 +2015,22 @@ mod tests {
         rows[STATUS_Y as usize].clone()
     }
 
+    /// Whether any rendered row holds `text`, for popup assertions.
+    fn shows(d: &mut DetailsDialog, text: &str) -> bool {
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        rows.iter().any(|r| r.contains(text))
+    }
+
+    /// Asserts the message popup holds `text`, then dismisses it with one consumed key.
+    fn dismiss(d: &mut DetailsDialog, text: &str) {
+        assert!(shows(d, text), "popup missing: {text}");
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('x')),
+            DetailsEvent::Consumed
+        );
+        assert!(!shows(d, text), "popup not dismissed: {text}");
+    }
+
     #[test]
     /// TU-R-079, TU-E-051, TU-E-056, TU-E-058 — `:` on the `Files Changed` tab opens the overlay's own centered bordered command line with the review help, Enter runs the trimmed input and Esc only closes; on another tab `:` does nothing; unknown input, a bad `submit` verdict and a second `review` each leave their notice on the bottom status line.
     fn ut_review_command_line() {
@@ -2029,23 +2063,16 @@ mod tests {
 
         assert_eq!(command(&mut d, "zzz sub"), DetailsEvent::Consumed);
         assert!(
-            status_row(&mut d).contains("unknown command: zzz sub"),
-            "{}",
+            !status_row(&mut d).contains("unknown command"),
+            "messages never land on the status line: {}",
             status_row(&mut d)
         );
+        dismiss(&mut d, "unknown command: zzz sub");
         assert_eq!(command(&mut d, "submit"), DetailsEvent::Consumed);
-        assert!(
-            status_row(&mut d).contains("usage: submit approve|changes|comment [summary]"),
-            "{}",
-            status_row(&mut d)
-        );
+        dismiss(&mut d, "usage: submit approve|changes|comment [summary]");
         assert_eq!(command(&mut d, "review"), DetailsEvent::Consumed);
         assert_eq!(command(&mut d, "review"), DetailsEvent::Consumed);
-        assert!(
-            status_row(&mut d).contains("review already started"),
-            "{}",
-            status_row(&mut d)
-        );
+        dismiss(&mut d, "review already started");
     }
 
     #[test]
@@ -2055,11 +2082,7 @@ mod tests {
         d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
         d.handle_key(KeyModifiers::NONE, KeyCode::Char('2'));
         assert_eq!(command(&mut d, "discard"), DetailsEvent::Consumed);
-        assert!(
-            status_row(&mut d).contains("no review: run :review"),
-            "{}",
-            status_row(&mut d)
-        );
+        dismiss(&mut d, "no review: run :review");
         assert_eq!(command(&mut d, "review"), DetailsEvent::Consumed);
         let buf = render_buffer(100, 30, |f| d.render(f.area(), f.buffer_mut()));
         let rows = crate::testkit::buffer_rows(&buf);
@@ -2076,7 +2099,16 @@ mod tests {
             (theme::TEMPLATE.review, theme::TEMPLATE.review),
             "purple fills the full row"
         );
-        assert!(row.contains("review started"), "{row}");
+        assert_eq!(
+            row.trim_matches(['│', ' ']),
+            "REVIEW",
+            "only the state on the line: {row}"
+        );
+        let center = edges.0 + (edges.1 - edges.0) / 2;
+        assert!(
+            (x..x + 6).contains(&center),
+            "label centered: x {x}, center {center}"
+        );
 
         assert_eq!(
             command(&mut d, "submit comment  nice work"),
@@ -2090,27 +2122,24 @@ mod tests {
                 body: "nice work".into(),
             })
         );
-        assert!(
-            status_row(&mut d).contains("submitting review.."),
-            "{}",
-            status_row(&mut d)
+        assert_eq!(
+            status_row(&mut d).trim_matches(['│', ' ']),
+            "SUBMITTING",
+            "the label is the state while the request runs"
         );
         assert_eq!(command(&mut d, "discard"), DetailsEvent::Consumed);
-        assert!(
-            status_row(&mut d).contains("review busy"),
-            "{}",
-            status_row(&mut d)
-        );
+        dismiss(&mut d, "review busy");
         d.handle_review(ReviewResult {
             review_id: Some("R_1".into()),
             added: 0,
             replied: 0,
             outcome: Err(crate::github::GithubError::Status(502)),
         });
-        let row = status_row(&mut d);
-        assert!(
-            row.contains("REVIEW") && row.contains("review failed: github: HTTP 502"),
-            "kept active: {row}"
+        dismiss(&mut d, "review failed: github: HTTP 502");
+        assert_eq!(
+            status_row(&mut d).trim_matches(['│', ' ']),
+            "REVIEW",
+            "a failed submit keeps review mode"
         );
         assert_eq!(
             command(&mut d, "discard"),
@@ -2118,10 +2147,9 @@ mod tests {
                 review_id: "R_1".into(),
             })
         );
-        let row = status_row(&mut d);
         assert!(
-            !row.contains("REVIEW") && row.contains("review discarded"),
-            "{row}"
+            !status_row(&mut d).contains("REVIEW"),
+            "discard ends review mode"
         );
         d.handle_review(ReviewResult {
             review_id: None,
@@ -2144,10 +2172,9 @@ mod tests {
             replied: 0,
             outcome: Ok(ReviewOutcome::Submitted),
         });
-        let row = status_row(&mut d);
         assert!(
-            !row.contains("REVIEW") && row.contains("review submitted"),
-            "{row}"
+            !status_row(&mut d).contains("REVIEW"),
+            "a successful submit ends review mode"
         );
         assert_eq!(
             d.handle_key(KeyModifiers::NONE, KeyCode::Char('q')),

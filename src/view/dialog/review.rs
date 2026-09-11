@@ -183,6 +183,10 @@ impl ReviewPanel {
         self.notice = Some(notice.to_string());
     }
 
+    pub fn clear_notice(&mut self) {
+        self.notice = None;
+    }
+
     /// The gutter marks of every thread on `path`.
     pub fn marks(&self, path: &str) -> Vec<MarkedRange> {
         self.threads
