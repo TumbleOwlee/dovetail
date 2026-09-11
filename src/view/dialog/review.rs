@@ -319,6 +319,16 @@ impl ReviewPanel {
         }
     }
 
+    /// Whether the focused editor sits in vim Insert mode, so Tab must reach it
+    /// as an indent instead of cycling the focus.
+    pub fn editing_insert(&self, visible: &[usize]) -> bool {
+        self.editor_focused(visible)
+            && self
+                .editor
+                .as_ref()
+                .is_some_and(|(_, s)| s.vim_mode() == VimMode::Insert)
+    }
+
     /// Whether an open editor holds the panel focus: a draft's always does, a reply's
     /// only while the reply stop is focused.
     fn editor_focused(&self, visible: &[usize]) -> bool {

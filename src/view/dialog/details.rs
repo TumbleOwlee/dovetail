@@ -2507,6 +2507,27 @@ mod tests {
     }
 
     #[test]
+    /// TU-R-085 — Tab while the comment editor is in Insert mode indents four spaces instead of cycling the focus.
+    fn ut_conversation_tab_in_insert_mode_indents() {
+        let mut d = pull_dialog();
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('c'));
+        for key in [KeyCode::Char('i'), KeyCode::Char('x'), KeyCode::Enter] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('y'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert_eq!(
+            command(&mut d, "submit"),
+            DetailsEvent::Comment {
+                subject_id: "N_1".into(),
+                body: "x\n    y".into(),
+            }
+        );
+    }
+
+    #[test]
     /// TU-R-085, TU-R-086, TU-E-059, TU-E-060, TU-E-062 — `c` on the conversation opens the comment editor box which keeps its draft when the focus leaves and closes when blank; bare `submit` posts the draft with the details' node id and shows SUBMITTING; arguments, a missing draft or a running post answer their popups; `discard` drops the draft; a failure keeps it, success requests the details anew.
     fn ut_conversation_comment() {
         let mut d = pull_dialog();

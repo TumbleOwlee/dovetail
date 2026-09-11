@@ -244,12 +244,17 @@ impl FilesState {
         modifiers: KeyModifiers,
         code: KeyCode,
     ) -> bool {
+        let editing_insert = self.focus == Panel::Comment
+            && self
+                .review
+                .as_ref()
+                .is_some_and(|r| r.editing_insert(&self.visible_threads(files)));
         match (code, self.focus) {
-            (KeyCode::Tab, _) => {
+            (KeyCode::Tab, _) if !editing_insert => {
                 self.cycle_focus(files, true);
                 true
             }
-            (KeyCode::BackTab, _) => {
+            (KeyCode::BackTab, _) if !editing_insert => {
                 self.cycle_focus(files, false);
                 true
             }
@@ -966,6 +971,38 @@ mod tests {
             s.review().and_then(|r| r.notice()),
             Some("no line to comment"),
             "TU-E-053"
+        );
+    }
+
+    #[test]
+    /// TU-R-081 — Tab while the focused editor is in Insert mode reaches the editor and indents four spaces instead of cycling the focus; in Normal mode it cycles again.
+    fn ut_tab_in_insert_mode_indents() {
+        let files = vec![file(
+            "a.rs",
+            FileStatus::Modified,
+            Some("@@ -1,3 +1,3 @@\n fn main() {\n-    old();\n+    new();\n }\n"),
+        )];
+        let mut s = FilesState::with_review(&files, &[]);
+        s.take_request();
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        s.review_mut().expect("review panel").active = true;
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('c'));
+        assert_eq!(s.focus(), Panel::Comment);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('i'));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('x'));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Enter);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(s.focus(), Panel::Comment, "the focus stays on the editor");
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('y'));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Esc);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(s.focus(), Panel::Tree, "Normal mode cycles again");
+        let review = s.review().expect("review panel");
+        assert_eq!(
+            review.pending().0[0].body,
+            "x\n    y",
+            "Tab indented four spaces"
         );
     }
 
