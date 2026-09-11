@@ -31,9 +31,11 @@ struct Entry {
     name: String,
 }
 
-/// The project search URL for a site, first page of 100.
+/// The project search URL for a site, first page of 100; trailing slashes
+/// on the base are stripped so the path never doubles the separator.
 pub fn projects_url(base_url: &str) -> String {
-    format!("{base_url}/rest/api/3/project/search?maxResults=100")
+    let base = base_url.trim_end_matches('/');
+    format!("{base}/rest/api/3/project/search?maxResults=100")
 }
 
 /// Projects from a search response body.
@@ -74,7 +76,7 @@ mod tests {
     use super::*;
 
     #[test]
-    /// AT-R-001, AT-R-003, AT-E-002 — the search URL is base + path with maxResults=100, base used as stored.
+    /// AT-R-001, AT-R-003, AT-E-002 — the search URL is base + path with maxResults=100, trailing slashes on the base stripped.
     fn ut_projects_url() {
         assert_eq!(
             projects_url("https://acme.atlassian.net"),
@@ -82,7 +84,11 @@ mod tests {
         );
         assert_eq!(
             projects_url("https://acme.atlassian.net/"),
-            "https://acme.atlassian.net//rest/api/3/project/search?maxResults=100"
+            "https://acme.atlassian.net/rest/api/3/project/search?maxResults=100"
+        );
+        assert_eq!(
+            projects_url("https://acme.atlassian.net//"),
+            "https://acme.atlassian.net/rest/api/3/project/search?maxResults=100"
         );
     }
 

@@ -27,4 +27,4 @@ table rows included. Cite the governing requirement inline.
 ## Known limitations — intentional constraints
 
 **AT-E-001** — Only the first 100 projects of a site are listed; `nextPage` is not followed. Cites AT-R-003.
-**AT-E-002** — A `base_url` with a trailing slash yields a double slash in the request path; the URL is used as stored. Cites AT-R-001.
+**AT-E-002** — Trailing slashes on a `base_url` are stripped before the request path is appended, so the URL never carries a double slash. Cites AT-R-001.
