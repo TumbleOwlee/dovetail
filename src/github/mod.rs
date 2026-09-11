@@ -2,6 +2,7 @@
 
 pub mod blob;
 pub mod board;
+pub mod comment;
 pub mod files;
 pub mod issue;
 pub mod projects;

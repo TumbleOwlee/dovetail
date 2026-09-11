@@ -84,3 +84,7 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-056** | `review` while review mode is already active | `review already started` in the message popup; cites TU-R-080 |
 | **TU-E-057** | `submit` with no local drafts and no pending replies | Allowed: the review submits with the verdict and summary alone; cites TU-R-084 |
 | **TU-E-058** | An unknown command in the overlay command line | `unknown command: <input>` in the message popup; cites TU-R-079 |
+| **TU-E-059** | `submit` with arguments, with no draft, or with a blank draft on the conversation view | `usage: submit` or `no comment to submit` in the message popup; nothing is sent; cites TU-R-086 |
+| **TU-E-060** | `c`, `submit` or `discard` while a comment post runs | `busy` in the message popup; nothing changes; cites TU-R-086 |
+| **TU-E-061** | The overlay closes while a comment draft exists or a post runs | The draft is dropped; a comment already accepted by GitHub stays there; cites TU-R-086 |
+| **TU-E-062** | `discard` with no comment draft on the conversation view | `no comment to discard` in the message popup; cites TU-R-086 |

@@ -36,6 +36,8 @@ pub enum Message {
     },
     /// A review mutation's outcome, for the open pull request overlay.
     Review(ReviewResult),
+    /// A posted conversation comment's outcome, for the posting overlay.
+    CommentPosted(Result<String, GithubError>),
 }
 
 /// Performs one fetch and sends its outcome; a dropped receiver ends it silently.
@@ -92,6 +94,13 @@ pub async fn dispatch(request: FetchRequest, client: reqwest::Client, tx: mpsc::
         },
         FetchRequest::Review { token, action } => {
             Message::Review(github::review::run(&client, &token, action).await)
+        }
+        FetchRequest::Comment {
+            token,
+            subject_id,
+            body,
+        } => {
+            Message::CommentPosted(github::comment::post(&client, &token, &subject_id, &body).await)
         }
     };
     let _ = tx.send(message).await;

@@ -6,7 +6,9 @@ use ferrowl_ui::state::{
     CodeInputFieldStateBuilder, CommandLineOutcome, CommandLineState, MarkdownInputFieldState,
     MarkdownInputFieldStateBuilder,
 };
+use ferrowl_ui::traits::{HandleEvents, SetFocus};
 use ferrowl_ui::widgets::{CommandLineBuilder, MarkdownInputField, MarkdownInputFieldBuilder};
+use ferrowl_ui::{Border, EventResult};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, HorizontalAlignment, Layout, Margin, Rect};
 use ratatui::style::{Color, Style};
@@ -178,6 +180,8 @@ impl DetailsTab {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetailsContent {
     pub panes: Panes,
+    /// GraphQL node id of the issue or pull request, the `addComment` subject.
+    pub subject_id: String,
     pub title: String,
     /// `open`, `closed`, `merged` or `draft`.
     pub state: &'static str,
@@ -201,6 +205,18 @@ pub enum DetailsEvent {
     FetchCommit(CommitRef),
     /// The caller runs this review action.
     Review(ReviewAction),
+    /// The caller posts this conversation comment.
+    Comment {
+        subject_id: String,
+        body: String,
+    },
+}
+
+/// What to request anew after a posted conversation comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommentRefetch {
+    Pull(PullRequestRef),
+    Issue(String),
 }
 
 enum Content {
@@ -218,8 +234,17 @@ enum Content {
         prefix: bool,
         commits: Box<CommitsView>,
         files: Box<FilesState>,
-        /// The overlay's own command line, opened with `:` on the `Files Changed` tab.
+        /// The overlay's own command line, opened with `:` on the `Files Changed` tab
+        /// and the conversation views.
         command: Box<CommandLineState>,
+        /// The conversation comment draft editor while its box is open.
+        comment: Option<Box<MarkdownInputFieldState>>,
+        /// The comment editor holds the conversation view's focus.
+        comment_focused: bool,
+        /// A comment post is running; the draft is locked until its outcome.
+        posting: bool,
+        /// A message popup outside review mode, dismissed by the next key.
+        notice: Option<String>,
     },
 }
 
@@ -261,6 +286,10 @@ impl DetailsDialog {
                 tab: DetailsTab::Conversation,
                 prefix: false,
                 command: Box::default(),
+                comment: None,
+                comment_focused: false,
+                posting: false,
+                notice: None,
             },
             Err(e) => Content::Failed(e.to_string()),
         };
@@ -332,6 +361,11 @@ impl DetailsDialog {
 
     pub fn handle_key(&mut self, modifiers: KeyModifiers, code: KeyCode) -> DetailsEvent {
         // An open message popup swallows the next key, whatever it is.
+        if let Content::Loaded { notice, .. } = &mut self.content
+            && notice.take().is_some()
+        {
+            return DetailsEvent::Consumed;
+        }
         if let Content::Loaded { files, .. } = &mut self.content
             && let Some(review) = files.review_mut()
             && review.notice().is_some()
@@ -341,17 +375,19 @@ impl DetailsDialog {
         }
         let armed = matches!(self.content, Content::Loaded { prefix: true, .. });
         // The overlay's own command line eats every key while open.
-        if let Content::Loaded {
-            tab: DetailsTab::Files,
-            command,
-            ..
-        } = &mut self.content
-            && let Some(outcome) = command.handle_key(modifiers, code)
+        if let Content::Loaded { tab, command, .. } = &mut self.content
+            && matches!(tab, DetailsTab::Files | DetailsTab::Conversation)
         {
-            return match outcome {
-                CommandLineOutcome::Submit(input) => self.run_review_command(&input),
-                CommandLineOutcome::Cancel | CommandLineOutcome::Consumed => DetailsEvent::Consumed,
-            };
+            let review = *tab == DetailsTab::Files;
+            if let Some(outcome) = command.handle_key(modifiers, code) {
+                return match outcome {
+                    CommandLineOutcome::Submit(input) if review => self.run_review_command(&input),
+                    CommandLineOutcome::Submit(input) => self.run_comment_command(&input),
+                    CommandLineOutcome::Cancel | CommandLineOutcome::Consumed => {
+                        DetailsEvent::Consumed
+                    }
+                };
+            }
         }
         // Esc and q reach a focused Files panel or an open commit diff first: they may
         // only leave the widget's visual mode, the comment panel or the commit table;
@@ -364,6 +400,13 @@ impl DetailsDialog {
             &self.content,
             Content::Loaded { tab: DetailsTab::Commits, commits, .. }
                 if commits.diff_open() && code == KeyCode::Esc
+        ) || matches!(
+            &self.content,
+            Content::Loaded {
+                tab: DetailsTab::Conversation,
+                comment_focused: true,
+                ..
+            }
         );
         if !armed && !widget_focused && matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
             return DetailsEvent::Close;
@@ -378,6 +421,10 @@ impl DetailsDialog {
             commits,
             files,
             command,
+            comment,
+            comment_focused,
+            posting,
+            notice,
         } = &mut self.content
         else {
             return DetailsEvent::Consumed;
@@ -408,7 +455,81 @@ impl DetailsDialog {
             return DetailsEvent::Consumed;
         }
         match tab {
-            DetailsTab::Conversation => {}
+            DetailsTab::Conversation => {
+                if *comment_focused && let Some(state) = comment {
+                    if (modifiers, code) == (KeyModifiers::CONTROL, KeyCode::Char('d')) {
+                        // Delete through the editor's own vim pipeline so `u` restores it.
+                        for (m, k) in [
+                            (KeyModifiers::NONE, KeyCode::Esc),
+                            (KeyModifiers::NONE, KeyCode::Char('g')),
+                            (KeyModifiers::NONE, KeyCode::Char('g')),
+                            (KeyModifiers::SHIFT, KeyCode::Char('V')),
+                            (KeyModifiers::SHIFT, KeyCode::Char('G')),
+                            (KeyModifiers::NONE, KeyCode::Char('d')),
+                        ] {
+                            state.handle_events(m, k);
+                        }
+                        return DetailsEvent::Consumed;
+                    }
+                    match state.handle_events(modifiers, code) {
+                        EventResult::Consumed => return DetailsEvent::Consumed,
+                        EventResult::Unhandled(..) => {
+                            if code == KeyCode::Esc {
+                                state.set_focused(false);
+                                if state.content().trim().is_empty() {
+                                    *comment = None;
+                                }
+                                *comment_focused = false;
+                            }
+                            return DetailsEvent::Consumed;
+                        }
+                    }
+                }
+                match (modifiers, code) {
+                    (KeyModifiers::NONE, KeyCode::Char('c')) => {
+                        if *posting {
+                            *notice = Some("busy".to_string());
+                        } else {
+                            let state = comment.get_or_insert_with(|| {
+                                Box::new(crate::view::dialog::review::comment_field(""))
+                            });
+                            state.set_focused(true);
+                            *comment_focused = true;
+                        }
+                        return DetailsEvent::Consumed;
+                    }
+                    (KeyModifiers::NONE, KeyCode::Char(':')) => {
+                        command.open();
+                        return DetailsEvent::Consumed;
+                    }
+                    (KeyModifiers::NONE, KeyCode::Tab | KeyCode::BackTab) if comment.is_some() => {
+                        let boxes = content.boxes.len().max(1);
+                        let forward = code == KeyCode::Tab;
+                        if *comment_focused {
+                            if let Some(state) = comment {
+                                state.set_focused(false);
+                                if state.content().trim().is_empty() {
+                                    *comment = None;
+                                }
+                            }
+                            *comment_focused = false;
+                            *focus = if forward { 0 } else { boxes - 1 };
+                        } else if (forward && *focus + 1 == boxes) || (!forward && *focus == 0) {
+                            if let Some(state) = comment {
+                                state.set_focused(true);
+                            }
+                            *comment_focused = true;
+                        } else if forward {
+                            *focus += 1;
+                        } else {
+                            *focus -= 1;
+                        }
+                        *cursor = 0;
+                        return DetailsEvent::Consumed;
+                    }
+                    _ => {}
+                }
+            }
             DetailsTab::Commits => {
                 commits.handle_key(modifiers, code);
                 return match commits.take_request() {
@@ -559,6 +680,105 @@ impl DetailsDialog {
         }
     }
 
+    /// Executes one submitted conversation command; unknown input becomes a popup.
+    fn run_comment_command(&mut self, input: &str) -> DetailsEvent {
+        let Content::Loaded {
+            content,
+            comment,
+            comment_focused,
+            posting,
+            notice,
+            ..
+        } = &mut self.content
+        else {
+            return DetailsEvent::Consumed;
+        };
+        let words: Vec<&str> = input.split_whitespace().collect();
+        match words.as_slice() {
+            [] => DetailsEvent::Consumed,
+            ["submit"] => {
+                if *posting {
+                    *notice = Some("busy".to_string());
+                    return DetailsEvent::Consumed;
+                }
+                let body = comment
+                    .as_ref()
+                    .map(|state| state.content().trim().to_string())
+                    .unwrap_or_default();
+                if body.is_empty() {
+                    *notice = Some("no comment to submit".to_string());
+                    return DetailsEvent::Consumed;
+                }
+                *posting = true;
+                DetailsEvent::Comment {
+                    subject_id: content.subject_id.clone(),
+                    body,
+                }
+            }
+            ["submit", ..] => {
+                *notice = Some("usage: submit".to_string());
+                DetailsEvent::Consumed
+            }
+            ["discard"] => {
+                if *posting {
+                    *notice = Some("busy".to_string());
+                } else if comment.is_none() {
+                    *notice = Some("no comment to discard".to_string());
+                } else {
+                    *comment = None;
+                    *comment_focused = false;
+                }
+                DetailsEvent::Consumed
+            }
+            _ => {
+                *notice = Some(format!("unknown command: {input}"));
+                DetailsEvent::Consumed
+            }
+        }
+    }
+
+    /// Whether a conversation comment post is in flight, for routing its outcome.
+    pub fn posting(&self) -> bool {
+        matches!(self.content, Content::Loaded { posting: true, .. })
+    }
+
+    /// Applies a posted comment's outcome; success answers what to request anew.
+    pub fn handle_comment(
+        &mut self,
+        result: Result<String, crate::github::GithubError>,
+    ) -> Option<CommentRefetch> {
+        let Content::Loaded {
+            content,
+            comment,
+            comment_focused,
+            posting,
+            notice,
+            ..
+        } = &mut self.content
+        else {
+            return None;
+        };
+        *posting = false;
+        match result {
+            Ok(_) => {
+                *comment = None;
+                *comment_focused = false;
+                Some(match &content.panes {
+                    Panes::Pull { owner, repo, .. } => CommentRefetch::Pull(PullRequestRef {
+                        owner: owner.clone(),
+                        repo: repo.clone(),
+                        number: self.number,
+                    }),
+                    Panes::Conversation => CommentRefetch::Issue(content.subject_id.clone()),
+                })
+            }
+            Err(error) => {
+                *notice = Some(format!("comment failed: {error}"));
+                None
+            }
+        }
+    }
+
     /// Applies a finished review request's outcome to the panel and the status line;
     /// a successful submit answers the repository coordinates whose pull request
     /// details the caller requests anew.
@@ -626,17 +846,25 @@ impl DetailsDialog {
                 commits,
                 files,
                 command,
+                comment,
+                posting,
+                notice,
                 ..
             } => {
                 // The bottom row becomes the review status line while review mode is
-                // active: only the state, its label centered on the purple fill.
-                let status = files.review().filter(|r| r.active).map(|r| {
-                    if r.submitting {
-                        " SUBMITTING "
-                    } else {
-                        " REVIEW "
-                    }
-                });
+                // active or a comment posts: only the state, its label centered on the
+                // purple fill.
+                let status = if *posting {
+                    Some(" SUBMITTING ")
+                } else {
+                    files.review().filter(|r| r.active).map(|r| {
+                        if r.submitting {
+                            " SUBMITTING "
+                        } else {
+                            " REVIEW "
+                        }
+                    })
+                };
                 let inner = match status {
                     Some(label) => {
                         let [rest, line] =
@@ -679,19 +907,45 @@ impl DetailsDialog {
                     (Panes::Pull { files: changed, .. }, DetailsTab::Files) => {
                         files.render(changed, body, buf);
                         if command.is_open() {
-                            render_command_panel(command, body, buf);
+                            render_command_panel(command, REVIEW_HELP, body, buf);
                         }
                     }
                     _ => {
                         let [left, bar] =
                             Layout::horizontal([Constraint::Min(0), Constraint::Length(BAR_WIDTH)])
                                 .areas(body);
+                        let left = match comment {
+                            Some(state) => {
+                                let height = (body.height / 3).clamp(3, 12);
+                                let [cards, editor] = Layout::vertical([
+                                    Constraint::Min(0),
+                                    Constraint::Length(height),
+                                ])
+                                .areas(left);
+                                let widget = MarkdownInputFieldBuilder::default()
+                                    .border(Border::Full(Margin::new(1, 0)))
+                                    .title(Some(" comment ".into()))
+                                    .style(theme::input_field_style())
+                                    .build()
+                                    .expect("MarkdownInputField fields all default");
+                                StatefulWidget::render(&widget, editor, buf, state.as_mut());
+                                cards
+                            }
+                            None => left,
+                        };
                         render_cards(content, number, scroll, left, buf);
                         render_bar(&content.boxes, *focus, *cursor, bar, buf);
+                        if command.is_open() {
+                            render_command_panel(command, COMMENT_HELP, body, buf);
+                        }
                     }
                 }
-                if let Some(notice) = files.review().and_then(|r| r.notice()) {
-                    render_message_popup(notice, inner, buf);
+                if let Some(message) = files
+                    .review()
+                    .and_then(|r| r.notice())
+                    .or(notice.as_deref())
+                {
+                    render_message_popup(message, inner, buf);
                 }
             }
         }
@@ -811,7 +1065,28 @@ fn render_message_popup(message: &str, area: Rect, buf: &mut Buffer) {
 
 /// The overlay's own command line: a centered bordered panel over the `Files Changed`
 /// tab body; the widget draws its help box above the panel.
-fn render_command_panel(command: &mut CommandLineState, area: Rect, buf: &mut Buffer) {
+/// The Files Changed tab's review commands.
+const REVIEW_HELP: &[(&str, &str)] = &[
+    ("review", "start review mode"),
+    (
+        "submit approve|changes|comment [summary]",
+        "submit the review",
+    ),
+    ("discard", "drop drafts and the review"),
+];
+
+/// The conversation views' comment commands.
+const COMMENT_HELP: &[(&str, &str)] = &[
+    ("submit", "post the comment"),
+    ("discard", "drop the comment draft"),
+];
+
+fn render_command_panel(
+    command: &mut CommandLineState,
+    help: &[(&str, &str)],
+    area: Rect,
+    buf: &mut Buffer,
+) {
     let width = area.width.saturating_sub(8).clamp(20, 60).min(area.width);
     // Borders, the widget's help box (its three entries plus its own borders) and the
     // input row; the widget anchors the help directly above the input row, so a bottom
@@ -839,17 +1114,11 @@ fn render_command_panel(command: &mut CommandLineState, area: Rect, buf: &mut Bu
         .style(theme::input_field_style())
         .highlight_style(theme::on_bg(theme::TEMPLATE.hi))
         .error_style(theme::on_bg(theme::TEMPLATE.error))
-        .help(vec![
-            ("review".to_string(), "start review mode".to_string()),
-            (
-                "submit approve|changes|comment [summary]".to_string(),
-                "submit the review".to_string(),
-            ),
-            (
-                "discard".to_string(),
-                "drop drafts and the review".to_string(),
-            ),
-        ])
+        .help(
+            help.iter()
+                .map(|(usage, text)| (usage.to_string(), text.to_string()))
+                .collect(),
+        )
         .build()
         .expect("CommandLineBuilder fields all default");
     StatefulWidget::render(&widget, input, buf, command);
@@ -1085,6 +1354,7 @@ mod tests {
     fn content(body: &str, timeline: Vec<TimelineItem>) -> DetailsContent {
         DetailsContent {
             panes: Panes::Conversation,
+            subject_id: "N_1".into(),
             title: "Fix crash".into(),
             state: "open",
             author: Some("octo".into()),
@@ -2052,14 +2322,25 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-079, TU-E-051, TU-E-056, TU-E-058 — `:` on the `Files Changed` tab opens the overlay's own centered bordered command line with the review help, Enter runs the trimmed input and Esc only closes; on another tab `:` does nothing; unknown input, a bad `submit` verdict and a second `review` each leave their notice on the bottom status line.
+    /// TU-R-079, TU-E-051, TU-E-056, TU-E-058 — `:` on the `Files Changed` tab opens the overlay's own centered bordered command line with the review help, Enter runs the trimmed input and Esc only closes; the conversation view opens it with the comment help and the `Commits` tab not at all; unknown input, a bad `submit` verdict and a second `review` each land in the message popup.
     fn ut_review_command_line() {
         let mut d = pull_dialog();
         d.handle_key(KeyModifiers::NONE, KeyCode::Char(':'));
         let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
         assert!(
+            rows.iter().any(|r| r.contains(" command "))
+                && rows.iter().any(|r| r.contains("post the comment"))
+                && !rows.iter().any(|r| r.contains("start review mode")),
+            "the conversation opens the comment command line: {rows:?}"
+        );
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('1'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char(':'));
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
             !rows.iter().any(|r| r.contains(" command ")),
-            "no command line off the Files tab: {rows:?}"
+            "no command line on the Commits tab: {rows:?}"
         );
         d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
         d.handle_key(KeyModifiers::NONE, KeyCode::Char('2'));
@@ -2215,6 +2496,95 @@ mod tests {
         assert_eq!(
             d.handle_key(KeyModifiers::NONE, KeyCode::Char('q')),
             DetailsEvent::Close
+        );
+    }
+
+    #[test]
+    /// TU-R-085, TU-R-086, TU-E-059, TU-E-060, TU-E-062 — `c` on the conversation opens the comment editor box which keeps its draft when the focus leaves and closes when blank; bare `submit` posts the draft with the details' node id and shows SUBMITTING; arguments, a missing draft or a running post answer their popups; `discard` drops the draft; a failure keeps it, success requests the details anew.
+    fn ut_conversation_comment() {
+        let mut d = pull_dialog();
+        assert_eq!(command(&mut d, "submit"), DetailsEvent::Consumed);
+        dismiss(&mut d, "no comment to submit");
+        assert_eq!(command(&mut d, "discard"), DetailsEvent::Consumed);
+        dismiss(&mut d, "no comment to discard");
+
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('c'));
+        assert!(shows(&mut d, " comment "), "editor box under the cards");
+        for key in [
+            KeyCode::Char('i'),
+            KeyCode::Char('h'),
+            KeyCode::Char('i'),
+            KeyCode::Esc,
+        ] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert!(
+            shows(&mut d, " comment ") && shows(&mut d, "hi"),
+            "the box keeps its draft when the focus leaves"
+        );
+        assert_eq!(command(&mut d, "submit now"), DetailsEvent::Consumed);
+        dismiss(&mut d, "usage: submit");
+        assert_eq!(command(&mut d, "discard"), DetailsEvent::Consumed);
+        assert!(!shows(&mut d, " comment "), "discard drops the draft");
+
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('c'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert!(!shows(&mut d, " comment "), "a blank draft closes the box");
+
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('c'));
+        for key in [
+            KeyCode::Char('i'),
+            KeyCode::Char('o'),
+            KeyCode::Char('k'),
+            KeyCode::Esc,
+        ] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert_eq!(
+            command(&mut d, "submit"),
+            DetailsEvent::Comment {
+                subject_id: "N_1".into(),
+                body: "ok".into(),
+            }
+        );
+        assert_eq!(status_row(&mut d).trim_matches(['│', ' ']), "SUBMITTING");
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('c'));
+        dismiss(&mut d, "busy");
+        d.handle_comment(Err(crate::github::GithubError::Status(502)));
+        dismiss(&mut d, "comment failed: github: HTTP 502");
+        assert!(shows(&mut d, " comment "), "a failure keeps the draft");
+        assert!(matches!(
+            command(&mut d, "submit"),
+            DetailsEvent::Comment { .. }
+        ));
+        assert_eq!(
+            d.handle_comment(Ok("IC_1".into())),
+            Some(CommentRefetch::Pull(PullRequestRef {
+                owner: "o".into(),
+                repo: "r".into(),
+                number: 5,
+            })),
+            "success requests the pull request anew"
+        );
+        assert!(!shows(&mut d, " comment "), "success drops the draft");
+
+        let mut d = DetailsDialog::new(7, "Crash".into(), "Loading");
+        d.set_result(Ok::<_, String>(content("body", vec![])));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('c'));
+        for key in [KeyCode::Char('i'), KeyCode::Char('y'), KeyCode::Esc] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert!(matches!(
+            command(&mut d, "submit"),
+            DetailsEvent::Comment { .. }
+        ));
+        assert_eq!(
+            d.handle_comment(Ok("IC_2".into())),
+            Some(CommentRefetch::Issue("N_1".into())),
+            "an issue overlay refetches by node id"
         );
     }
 }

@@ -19,7 +19,7 @@ use crate::view::command_line::{CommandLine, CommandLineEvent};
 use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteForm};
 use crate::view::dialog::config::{Choice, Field};
 use crate::view::dialog::details::{
-    BlobRef, CommitRef, DetailsDialog, DetailsEvent, Link, PullRequestRef,
+    BlobRef, CommentRefetch, CommitRef, DetailsDialog, DetailsEvent, Link, PullRequestRef,
 };
 use crate::view::dialog::{issue, pull};
 use crate::view::notice;
@@ -75,6 +75,11 @@ pub enum FetchRequest {
     Review {
         token: String,
         action: ReviewAction,
+    },
+    Comment {
+        token: String,
+        subject_id: String,
+        body: String,
     },
 }
 
@@ -352,6 +357,37 @@ impl App {
         });
     }
 
+    /// Queues the issue details request anew, with either GitHub token.
+    fn request_issue_by_id(&mut self, id: String) {
+        let Some(token) = self
+            .github_remote()
+            .map(|(_, _, t)| t)
+            .or_else(|| self.github_board().map(|(_, _, t)| t))
+        else {
+            return;
+        };
+        self.pending_fetches.push(FetchRequest::Issue {
+            token: token.to_string(),
+            id,
+        });
+    }
+
+    /// Queues a conversation comment post, with either GitHub token.
+    fn request_comment(&mut self, subject_id: String, body: String) {
+        let Some(token) = self
+            .github_remote()
+            .map(|(_, _, t)| t)
+            .or_else(|| self.github_board().map(|(_, _, t)| t))
+        else {
+            return;
+        };
+        self.pending_fetches.push(FetchRequest::Comment {
+            token: token.to_string(),
+            subject_id,
+            body,
+        });
+    }
+
     /// Queues the pull request details request anew, with either GitHub token.
     fn request_pull(&mut self, pull: PullRequestRef) {
         let Some(token) = self
@@ -412,6 +448,21 @@ impl App {
             }
             return;
         }
+        if let Message::CommentPosted(result) = message {
+            let dialog = match (self.pull.as_mut(), self.issue.as_mut()) {
+                (Some(pull), _) if pull.posting() => Some(pull),
+                (_, Some(issue)) if issue.posting() => Some(issue),
+                _ => None,
+            };
+            if let Some(dialog) = dialog {
+                match dialog.handle_comment(result) {
+                    Some(CommentRefetch::Pull(pull)) => self.request_pull(pull),
+                    Some(CommentRefetch::Issue(id)) => self.request_issue_by_id(id),
+                    None => {}
+                }
+            }
+            return;
+        }
         if let Message::Review(result) = message {
             if let Some(dialog) = self.pull.as_mut()
                 && let Some(pull) = dialog.handle_review(result)
@@ -459,7 +510,8 @@ impl App {
             | Message::PullRequest(_)
             | Message::Blob { .. }
             | Message::CommitFiles { .. }
-            | Message::Review(_) => {
+            | Message::Review(_)
+            | Message::CommentPosted(_) => {
                 unreachable!("handled above")
             }
         };
@@ -508,6 +560,9 @@ impl App {
                     self.issue = None;
                     self.open_link(link);
                 }
+                DetailsEvent::Comment { subject_id, body } => {
+                    self.request_comment(subject_id, body);
+                }
                 DetailsEvent::Fetch(_) | DetailsEvent::FetchCommit(_) | DetailsEvent::Review(_) => {
                 }
             }
@@ -524,6 +579,9 @@ impl App {
                 DetailsEvent::Fetch(blob) => self.request_blob(Some(blob)),
                 DetailsEvent::FetchCommit(commit) => self.request_commit(commit),
                 DetailsEvent::Review(action) => self.request_review(action),
+                DetailsEvent::Comment { subject_id, body } => {
+                    self.request_comment(subject_id, body);
+                }
             }
             return;
         }

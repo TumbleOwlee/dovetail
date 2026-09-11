@@ -22,6 +22,9 @@ pub enum IssueState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Issue {
+    /// GraphQL node id, the handle for mutations; the requested id, absent in a parsed
+    /// page.
+    pub id: String,
     pub number: u64,
     pub title: String,
     pub state: IssueState,
@@ -194,6 +197,7 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
     );
     Ok(Page {
         issue: Issue {
+            id: String::new(),
             number: node.number,
             title: node.title,
             state: node.state,
@@ -274,7 +278,9 @@ pub async fn load_issue(
         }
         cursor = page.next_cursor;
         if cursor.is_none() {
-            return Ok(issue.expect("the first page was stored above"));
+            let mut issue = issue.expect("the first page was stored above");
+            issue.id = id.to_string();
+            return Ok(issue);
         }
     }
 }

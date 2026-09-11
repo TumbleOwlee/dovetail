@@ -29,6 +29,7 @@ pub fn content(issue: Issue) -> DetailsContent {
     };
     DetailsContent {
         panes: Panes::Conversation,
+        subject_id: issue.id,
         title: issue.title,
         state,
         author: issue.author,
@@ -88,6 +89,7 @@ mod tests {
     /// TU-R-060 — state and author carried; seven boxes in order with logins, badges, references and relationships.
     fn ut_issue_content() {
         let issue = Issue {
+            id: "I_7".into(),
             number: 7,
             title: "Crash on start".into(),
             state: IssueState::Closed,

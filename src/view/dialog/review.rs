@@ -60,15 +60,9 @@ impl UiThread {
         }
     }
 
-    /// The gutter mark color: purple for a local draft or pending reply, yellow for a
-    /// remote thread.
+    /// The gutter mark color: the purple review colour for every thread.
     fn color(&self) -> ratatui::style::Color {
-        match self {
-            UiThread::Draft { .. } | UiThread::Remote { reply: Some(_), .. } => {
-                theme::TEMPLATE.review
-            }
-            UiThread::Remote { reply: None, .. } => theme::TEMPLATE.warning,
-        }
+        theme::TEMPLATE.review
     }
 
     /// The tab bar caption: `draft` for a local draft, the first comment's author for a
@@ -149,6 +143,12 @@ fn field(read_only: bool, content: &str, focused: bool) -> MarkdownInputFieldSta
     state.set_read_only(read_only);
     state.set_focused(focused);
     state
+}
+
+/// A focused, editable markdown editor prefilled with `content`, for a conversation
+/// comment draft.
+pub(crate) fn comment_field(content: &str) -> MarkdownInputFieldState {
+    field(false, content, true)
 }
 
 impl ReviewPanel {
@@ -725,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-081 — resolved remote threads are hidden and the rest marked in the gutter, yellow for a remote thread, purple once a reply is pending or for a local draft; the diff selection's touched file lines pick the visible threads by path and side.
+    /// TU-R-081 — resolved remote threads are hidden and the rest marked in the gutter in the purple review colour, remote threads and local drafts alike; the diff selection's touched file lines pick the visible threads by path and side.
     fn ut_remote_threads_marks_and_visibility() {
         let mut panel = ReviewPanel::new(&[
             remote("T_1", 3, 5, false),
@@ -735,7 +735,7 @@ mod tests {
         let marks = panel.marks("a.rs");
         assert_eq!(marks.len(), 2, "resolved thread hidden");
         assert_eq!(marks[0].lines, 3..=5);
-        assert!(marks.iter().all(|m| m.color == theme::TEMPLATE.warning));
+        assert!(marks.iter().all(|m| m.color == theme::TEMPLATE.review));
         assert_eq!(panel.marks("other.rs"), vec![]);
         assert_eq!(panel.visible("a.rs", &[], &[4]), vec![0]);
         assert_eq!(
@@ -754,7 +754,7 @@ mod tests {
         assert_eq!(
             panel.marks("a.rs")[0].color,
             theme::TEMPLATE.review,
-            "pending reply purple"
+            "remote threads purple too"
         );
         panel.open_draft("a.rs", Side::New, 7..=7);
         typed(&mut panel, &[], "new");

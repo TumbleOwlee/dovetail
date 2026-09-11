@@ -70,7 +70,9 @@ pub fn content(details: PullDetails) -> DetailsContent {
         (PullState::Merged, _) => "merged",
         (PullState::Closed, _) => "closed",
     };
+    let subject_id = details.id.clone();
     DetailsContent {
+        subject_id,
         panes: Panes::Pull {
             commits: details.commits,
             files: details.files,
