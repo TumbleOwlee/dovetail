@@ -86,6 +86,8 @@ pub struct FilesState {
     review: Option<ReviewPanel>,
     /// The tab's chosen diff layout, kept when the selection moves to another file.
     layout: DiffLayout,
+    /// The tab's line-wrap choice, kept like the layout; off by default.
+    wrap: bool,
 }
 
 impl FilesState {
@@ -136,6 +138,7 @@ impl FilesState {
             request: None,
             review: None,
             layout: DiffLayout::Split,
+            wrap: false,
         };
         state.refresh(files);
         state
@@ -270,6 +273,18 @@ impl FilesState {
                     Shown::View(state) => {
                         state.handle_events(KeyModifiers::CONTROL, KeyCode::Char('t'));
                         self.layout = state.layout();
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            (KeyCode::Char('w'), Panel::Diff) if modifiers == KeyModifiers::NONE => {
+                match self.shown {
+                    // The wrap option is builder-set, so the toggle rebuilds the shown
+                    // diff.
+                    Shown::View(_) => {
+                        self.wrap = !self.wrap;
+                        self.refresh(files);
                         true
                     }
                     _ => false,
@@ -413,7 +428,10 @@ impl FilesState {
             self.blobs.insert(file.path.clone(), Loaded::Loading);
             self.request = Some(file.path.clone());
         }
-        let builder = DiffViewStateBuilder::default().layout(self.layout).clone();
+        let builder = DiffViewStateBuilder::default()
+            .layout(self.layout)
+            .wrap(self.wrap)
+            .clone();
         let mut state = match self.blobs.get(&file.path) {
             Some(Loaded::Blob(Blob::Text(text))) => builder
                 .build_with_diff_and_file(patch, text)
@@ -985,6 +1003,47 @@ mod tests {
             (removed.side, removed.start_line, removed.line),
             (crate::github::review::Side::Left, 2, 2),
             "a removed-only line drafts on the old side"
+        );
+    }
+
+    #[test]
+    /// TU-R-075 — `w` on the focused diff panel toggles the widget's line wrap, off by default; the choice is the tab's and persists across file selections; `w` on the focused tree does not toggle.
+    fn ut_wrap_toggle() {
+        let long = "@@ -1,1 +1,2 @@\n keep\n+alpha beta gamma delta epsilon zeta eta theta iota kappa omega\n";
+        let files = vec![
+            file("a.rs", FileStatus::Modified, Some(long)),
+            file("b.rs", FileStatus::Modified, Some(long)),
+        ];
+        let mut s = FilesState::new(&files);
+        s.take_request();
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('w'));
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert!(
+            !rows.iter().any(|r| r.contains("omega")),
+            "tree w is no toggle, the long line stays clipped: {rows:?}"
+        );
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        assert!(s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('w')));
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert!(
+            rows.iter().any(|r| r.contains("omega")),
+            "wrapped tail visible: {rows:?}"
+        );
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        assert_eq!(s.selected(), Some(1));
+        s.take_request();
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert!(
+            rows.iter().any(|r| r.contains("omega")),
+            "wrap persists across files: {rows:?}"
+        );
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('w'));
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert!(
+            !rows.iter().any(|r| r.contains("omega")),
+            "back to clipped: {rows:?}"
         );
     }
 }
