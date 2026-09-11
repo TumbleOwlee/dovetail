@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ferrowl_ui::state::{
-    DiffViewState, DiffViewStateBuilder, FileStatus as TreeStatus, FileTreeState,
+    DiffLayout, DiffViewState, DiffViewStateBuilder, FileStatus as TreeStatus, FileTreeState,
     FileTreeStateBuilder, Side,
 };
 use ferrowl_ui::traits::{HandleEvents, SetFocus};
@@ -84,6 +84,8 @@ pub struct FilesState {
     request: Option<String>,
     /// Review threads and mode; `None` outside the pull request's own diff.
     review: Option<ReviewPanel>,
+    /// The tab's chosen diff layout, kept when the selection moves to another file.
+    layout: DiffLayout,
 }
 
 impl FilesState {
@@ -133,6 +135,7 @@ impl FilesState {
             shown: Shown::Empty,
             request: None,
             review: None,
+            layout: DiffLayout::Split,
         };
         state.refresh(files);
         state
@@ -266,6 +269,7 @@ impl FilesState {
                     // tab-switch chord consumes first; `t` stands in for it here.
                     Shown::View(state) => {
                         state.handle_events(KeyModifiers::CONTROL, KeyCode::Char('t'));
+                        self.layout = state.layout();
                         true
                     }
                     _ => false,
@@ -407,11 +411,12 @@ impl FilesState {
             self.blobs.insert(file.path.clone(), Loaded::Loading);
             self.request = Some(file.path.clone());
         }
+        let builder = DiffViewStateBuilder::default().layout(self.layout).clone();
         let mut state = match self.blobs.get(&file.path) {
-            Some(Loaded::Blob(Blob::Text(text))) => DiffViewStateBuilder::default()
+            Some(Loaded::Blob(Blob::Text(text))) => builder
                 .build_with_diff_and_file(patch, text)
                 .expect("DiffViewState fields all default"),
-            _ => DiffViewStateBuilder::default()
+            _ => builder
                 .build_with_diff(patch)
                 .expect("DiffViewState fields all default"),
         };
@@ -708,13 +713,20 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-075 — `t` on the focused diff panel toggles between the split and unified layouts, split by default; `t` on the focused tree does not.
+    /// TU-R-075 — `t` on the focused diff panel toggles between the split and unified layouts, split by default; `t` on the focused tree does not; the chosen layout is the tab's: it persists when the selection moves to another file and for content arriving later.
     fn ut_layout_toggle() {
-        let files = vec![file(
-            "a.rs",
-            FileStatus::Modified,
-            Some("@@ -1,3 +1,3 @@\n fn main() {\n-    old();\n+    new();\n }\n"),
-        )];
+        let files = vec![
+            file(
+                "a.rs",
+                FileStatus::Modified,
+                Some("@@ -1,3 +1,3 @@\n fn main() {\n-    old();\n+    new();\n }\n"),
+            ),
+            file(
+                "b.rs",
+                FileStatus::Modified,
+                Some("@@ -1,3 +1,3 @@\n fn other() {\n-    old();\n+    new();\n }\n"),
+            ),
+        ];
         let mut s = FilesState::new(&files);
         s.take_request();
         s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('t'));
@@ -736,6 +748,36 @@ mod tests {
         s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('t'));
         let (rows, _) = draw(&mut s, &files, 12);
         assert_eq!(count(&rows, "fn main() {"), 2, "back to split: {rows:?}");
+
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('t'));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        assert_eq!(s.selected(), Some(1));
+        s.take_request();
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert_eq!(
+            count(&rows, "fn other() {"),
+            1,
+            "unified persists across files: {rows:?}"
+        );
+        s.handle_blob(&files, "b.rs", text("fn other() {\n    new();\n}\n"));
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert_eq!(
+            count(&rows, "fn other() {"),
+            1,
+            "unified survives the arrived content: {rows:?}"
+        );
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('t'));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('k'));
+        assert_eq!(s.selected(), Some(0));
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert_eq!(
+            count(&rows, "fn main() {"),
+            2,
+            "split persists back on the first file: {rows:?}"
+        );
     }
 
     #[test]
