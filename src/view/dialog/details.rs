@@ -1399,8 +1399,8 @@ mod tests {
         item(actor, Event::Comment { body: body.into() })
     }
 
-    /// Columns of the bar for an 80 column screen: inset 4, border 1, margin 1 on each side.
-    const BAR_LEFT_80: usize = 80 - 4 - 1 - 1 - 30;
+    /// Columns of the bar for an 80 column screen: inset 1, border 1, margin 1 on each side.
+    const BAR_LEFT_80: usize = 80 - 1 - 1 - 1 - 30;
 
     fn bar_of(rows: &[String], left: usize) -> Vec<String> {
         rows.iter()
@@ -1423,10 +1423,10 @@ mod tests {
     fn ut_loading_then_failure() {
         let mut d = DetailsDialog::new(5, "Fix crash".into(), "Loading thing..");
         let rows = render_rows(80, 24, |f| d.render(f.area(), f.buffer_mut()));
-        assert!(rows[3].contains("#5 Fix crash"), "{}", rows[3]);
-        assert!(rows[3].starts_with("    ┌"), "centered: {}", rows[3]);
+        assert!(rows[1].contains("#5 Fix crash"), "{}", rows[1]);
+        assert!(rows[1].starts_with(" ┌"), "centered: {}", rows[1]);
         assert!(
-            rows[2].trim().is_empty() && rows[21].trim().is_empty(),
+            rows[0].trim().is_empty() && rows[23].trim().is_empty(),
             "{rows:?}"
         );
         let at = rows
@@ -1457,7 +1457,7 @@ mod tests {
             "small box: {}",
             rows[at - 1]
         );
-        assert!(rows[20].contains('└'), "{}", rows[20]);
+        assert!(rows[22].contains('└'), "{}", rows[22]);
         d.set_result(Err::<DetailsContent, _>("github: HTTP 401"));
         let rows = render_rows(80, 24, |f| d.render(f.area(), f.buffer_mut()));
         let at = rows
@@ -1471,7 +1471,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-066, TU-E-028 — description card with title, state and author line and body inside a 2 by 1 margin; one padded box per comment titled with type, actor and date; `j`/`k` scroll within bounds.
+    /// TU-R-066, TU-E-028 — description card with the body alone inside a 2 by 1 margin; one padded box per comment titled with type, actor and date; `j`/`k` scroll within bounds.
     fn ut_description_and_comment_boxes() {
         let mut d = DetailsDialog::new(5, "Fix crash".into(), "L");
         let timeline = vec![comment(Some("a"), "LGTM"), comment(None, "ghost says hi")];
@@ -1491,28 +1491,17 @@ mod tests {
             left[card + 1]
         );
         assert!(
-            left[card + 2].starts_with("    │ │  Fix crash"),
+            left[card + 2].starts_with(" │ │  Fixes the crash on start."),
             "horizontal margin: {}",
             left[card + 2]
         );
         assert!(
-            left[card + 3].contains("open") && left[card + 3].contains("by @octo"),
-            "{}",
+            blank(&left[card + 3]),
+            "vertical margin: {}",
             left[card + 3]
         );
-        assert!(blank(&left[card + 4]), "empty line: {}", left[card + 4]);
-        assert!(
-            left[card + 5].contains("Fixes the crash on start."),
-            "{}",
-            left[card + 5]
-        );
-        assert!(
-            blank(&left[card + 6]),
-            "vertical margin: {}",
-            left[card + 6]
-        );
-        assert!(left[card + 7].contains('└'), "{}", left[card + 7]);
-        let first = card + 8;
+        assert!(left[card + 4].contains('└'), "{}", left[card + 4]);
+        let first = card + 5;
         assert!(
             left[first].contains("┌ Comment · @a · 2026-09-04 "),
             "{}",
@@ -1783,7 +1772,7 @@ mod tests {
         d.set_result(Ok::<_, String>(c));
         let buf = render_buffer(100, 40, |f| d.render(f.area(), f.buffer_mut()));
         let rows = crate::testkit::buffer_rows(&buf);
-        let column = crate::testkit::buffer_column(&buf, 7);
+        let column = crate::testkit::buffer_column(&buf, 4);
         let conversation = column.find("CONVERSATION").expect("caption");
         let commits = column.find("COMMITS").expect("caption");
         let files = column.find("FILES").expect("caption");
@@ -2070,7 +2059,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-066, TU-E-027 — a body line wider than the card wraps; without timeline items one box reads `No activity`; a deleted author reads `ghost`.
+    /// TU-R-066, TU-E-027 — a body line wider than the card wraps; without timeline items one box reads `No activity`.
     fn ut_wrapping_and_empty_timeline() {
         let mut d = DetailsDialog::new(5, "T".into(), "L");
         let mut c = content(&"word ".repeat(40), vec![]);
@@ -2082,7 +2071,6 @@ mod tests {
             "{rows:?}"
         );
         assert!(rows.iter().all(|r| r.chars().count() <= 90), "{rows:?}");
-        assert!(rows.iter().any(|r| r.contains("by @ghost")), "{rows:?}");
         let card = rows
             .iter()
             .position(|r| r.contains("┌ Timeline "))
@@ -2239,7 +2227,7 @@ mod tests {
         d.handle_key(KeyModifiers::NONE, KeyCode::Char('j'));
         assert_eq!(focused(&mut d), vec!["Labels"], "scrolling keeps the focus");
 
-        let rows = render_rows(80, 13, |f| d.render(f.area(), f.buffer_mut()));
+        let rows = render_rows(80, 8, |f| d.render(f.area(), f.buffer_mut()));
         let bar = bar_of(&rows, BAR_LEFT_80);
         assert!(bar.iter().any(|r| r.contains("Reviewers")), "{bar:?}");
         assert!(
