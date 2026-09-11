@@ -52,14 +52,14 @@ pub const TEMPLATE: ColorTemplate = ColorTemplate {
     text_hi: COLOR_SCHEME.text_hi,
     hi: COLOR_SCHEME.hi,
     hi_bg: COLOR_SCHEME.hi_bg,
-    border: COLOR_SCHEME.border,
+    border: Color::White,
     placeholder: COLOR_SCHEME.placeholder,
     error: COLOR_SCHEME.error,
     success: COLOR_SCHEME.success,
     warning: COLOR_SCHEME.warning,
     review: Color::Rgb(72, 40, 116),
     timeline: TimelineColors {
-        comment: COLOR_SCHEME.border,
+        comment: Color::White,
         closed: COLOR_SCHEME.error,
         merged: COLOR_SCHEME.hi,
         reopened: COLOR_SCHEME.success,
@@ -70,7 +70,7 @@ pub const TEMPLATE: ColorTemplate = ColorTemplate {
         review_requested: COLOR_SCHEME.info,
         approved: COLOR_SCHEME.success,
         changes_requested: COLOR_SCHEME.error,
-        reviewed: COLOR_SCHEME.border,
+        reviewed: Color::White,
         referenced: COLOR_SCHEME.placeholder,
     },
 };
@@ -188,5 +188,13 @@ mod tests {
         assert_eq!(tabs.selected.bg, Some(TEMPLATE.hi_bg));
         assert_eq!(base().bg, Some(BG));
         assert_eq!(on_bg(TEMPLATE.hi).fg, Some(TEMPLATE.hi));
+    }
+
+    #[test]
+    /// TU-R-088 — the default box border is white, the timeline comment and review entries with it.
+    fn ut_default_border_is_white() {
+        assert_eq!(TEMPLATE.border, Color::White);
+        assert_eq!(TEMPLATE.timeline.comment, Color::White);
+        assert_eq!(TEMPLATE.timeline.reviewed, Color::White);
     }
 }
