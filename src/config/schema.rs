@@ -98,6 +98,9 @@ pub trait Section {
     fn credentials(&self) -> Option<&str>;
     fn set_credentials(&mut self, credentials: Option<String>);
     /// Identifier keys and their values, in schema order, `credentials` and `kind` excluded.
+    // Only test consumers remain since the main view stopped rendering the summary;
+    // the allow lifts when a view lists section identifiers again.
+    #[allow(dead_code)]
     fn identifiers(&self) -> Vec<(&'static str, String)>;
 }
 

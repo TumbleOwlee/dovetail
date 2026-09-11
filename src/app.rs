@@ -25,6 +25,7 @@ use crate::view::dialog::{issue, pull};
 use crate::view::notice;
 use crate::view::remote::RemoteView;
 use crate::view::tabs::{self, Tab};
+use crate::view::theme;
 
 /// A fetch the loop runs on the app's behalf, keyed by the credentials it needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +151,12 @@ impl App {
         };
         app.request_board();
         app.request_remote();
+        let missing = app.settings.as_ref().is_some_and(|s| {
+            !app.credentials_present(&s.board) || !app.credentials_present(&s.remote)
+        });
+        if app.dialog.is_none() && missing {
+            app.open_dialog();
+        }
         app
     }
 
@@ -572,11 +579,6 @@ impl App {
         let [top, middle] =
             Layout::horizontal([Constraint::Length(tabs::TAB_LINE_WIDTH), Constraint::Min(1)])
                 .areas(upper);
-        let present = self
-            .settings
-            .as_ref()
-            .is_some_and(|s| self.credentials_present(self.active_tab.section(s)));
-        let lines = tabs::summary_lines(self.active_tab, self.settings.as_ref(), present);
         let buf = frame.buffer_mut();
         tabs::render_tab_line(top, buf, self.active_tab);
         match self.active_tab {
@@ -584,7 +586,7 @@ impl App {
                 BoardState::Loaded(view) => view.render(middle, buf),
                 BoardState::Loading => board::render_loading(middle, buf),
                 BoardState::Failed(message) => notice::render_error(middle, buf, message),
-                BoardState::Unavailable => tabs::render_body(middle, buf, &lines),
+                BoardState::Unavailable => buf.set_style(middle, theme::base()),
             },
             Tab::Remote => match &mut self.remote {
                 RemoteState::Loaded(view) => view.render(middle, buf),
@@ -592,7 +594,7 @@ impl App {
                     notice::render_loading(middle, buf, "Pull requests are loading..");
                 }
                 RemoteState::Failed(message) => notice::render_error(middle, buf, message),
-                RemoteState::Unavailable => tabs::render_body(middle, buf, &lines),
+                RemoteState::Unavailable => buf.set_style(middle, theme::base()),
             },
         }
         self.command_line.render(bottom, buf);
@@ -1107,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-018, TU-R-019, TU-R-022 — tab line on top, summary in the middle, command line at the bottom.
+    /// TU-R-018, TU-R-019, TU-R-023 — tab line on top, an empty body for an unavailable tab, command line at the bottom.
     fn ut_render_layout() {
         let t = TempDir::new("render");
         let mut a = app(&t, Some(settings()));
@@ -1138,7 +1140,12 @@ mod tests {
         a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
         key(&mut a, KeyCode::Char('1'));
         let rows = render_rows(60, 10, |f| a.render(f));
-        assert_eq!(&rows[0][3..], "kind: github", "body right of the tab line");
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.contains("kind:") || r.contains("owner:")),
+            "no configuration text in the body: {rows:?}"
+        );
         a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
         key(&mut a, KeyCode::Char('0'));
         key(&mut a, KeyCode::Char(':'));
@@ -1195,6 +1202,7 @@ mod tests {
     fn ut_config_queues_jira_fetch() {
         let t = TempDir::new("fetchjira");
         let mut a = app(&t, Some(jira_settings()));
+        key(&mut a, KeyCode::Esc);
         a.user_config.credentials.insert(
             "j".into(),
             crate::config::Profile::Jira {
@@ -1274,6 +1282,7 @@ mod tests {
         );
         assert!(!joined.contains("loading projects"), "{joined}");
         let mut a = app(&t, Some(jira_settings()));
+        key(&mut a, KeyCode::Esc);
         a.user_config.credentials.insert(
             "j".into(),
             crate::config::Profile::Jira {
@@ -1311,7 +1320,10 @@ mod tests {
     /// TU-E-011 — an outcome arriving with no dialog waiting is discarded.
     fn ut_message_without_dialog_is_discarded() {
         let t = TempDir::new("late");
-        let mut a = app(&t, Some(settings()));
+        let mut complete = settings();
+        complete.remote.set_credentials(Some("gh".into()));
+        let mut a = app(&t, Some(complete));
+        assert!(a.dialog.is_none(), "complete credentials open no dialog");
         a.handle_message(Message::GithubProjects(Ok(Vec::new())));
         assert!(a.dialog.is_none());
         let _ = Choice {
@@ -1346,17 +1358,23 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-049, TU-R-050 — a GitHub board with credentials is requested at start and shows loading.
+    /// TU-R-049, TU-R-050, TU-R-024 — a GitHub board with credentials is requested at start; the remote section's missing credentials open the configuration dialog as the `config` command would, waiting on the project list.
     fn ut_board_requested_at_start() {
         let t = TempDir::new("boardstart");
         let mut a = app(&t, Some(settings()));
         assert_eq!(
             a.take_fetch_requests(),
-            vec![FetchRequest::Board {
-                token: "t".into(),
-                owner: "o".into(),
-                number: 1
-            }]
+            vec![
+                FetchRequest::Board {
+                    token: "t".into(),
+                    owner: "o".into(),
+                    number: 1
+                },
+                FetchRequest::GithubProjects {
+                    token: "t".into(),
+                    owner: "o".into()
+                }
+            ]
         );
         assert!(matches!(a.board, BoardState::Loading));
         let rows = render_rows(60, 6, |f| a.render(f));
@@ -1364,19 +1382,28 @@ mod tests {
     }
 
     #[test]
-    /// TU-E-019 — Jira or missing credentials: no request, summary stays.
-    fn ut_board_unavailable_keeps_summary() {
+    /// TU-E-019, TU-R-022, TU-R-024 — Jira or missing credentials: no board request, the tab body stays empty, and unresolved credentials opened the configuration dialog at start.
+    fn ut_board_unavailable_keeps_empty_body() {
         let t = TempDir::new("boardnone");
         let mut a = app(&t, Some(jira_settings()));
         assert!(a.take_fetch_requests().is_empty());
         assert!(matches!(a.board, BoardState::Unavailable));
+        assert!(a.dialog.is_some(), "missing credentials open the dialog");
+        key(&mut a, KeyCode::Esc);
+        assert!(a.dialog.is_none());
         let rows = render_rows(60, 6, |f| a.render(f));
-        assert_eq!(&rows[0][3..], "kind: jira");
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.contains("kind:") || r.contains("credentials")),
+            "empty body, no configuration text: {rows:?}"
+        );
         let mut without = settings();
         without.board.set_credentials(None);
         let mut a = app(&t, Some(without));
         assert!(a.take_fetch_requests().is_empty());
         assert!(matches!(a.board, BoardState::Unavailable));
+        assert!(a.dialog.is_some());
     }
 
     #[test]
@@ -1428,6 +1455,7 @@ mod tests {
         assert_eq!(a.take_fetch_requests().len(), 1);
         assert!(matches!(a.board, BoardState::Loading));
         let mut a = app(&t, Some(jira_settings()));
+        key(&mut a, KeyCode::Esc);
         command(&mut a, "reload");
         assert_eq!(a.command_line.error(), Some("not configured"));
     }
@@ -1582,8 +1610,8 @@ mod tests {
         key(&mut a, KeyCode::Char('1'));
         let rows = render_rows(80, 10, |f| a.render(f));
         assert!(
-            rows.iter().any(|r| r.contains("owner: o")),
-            "summary stays: {rows:?}"
+            !rows.iter().any(|r| r.contains("owner: o")),
+            "the body stays empty without a summary: {rows:?}"
         );
     }
 

@@ -48,10 +48,10 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-016** | The board has no cards | Columns render with their headers and no selection exists; navigation keys do nothing; cites TU-R-054 |
 | **TU-E-017** | A single word of a title is wider than the card | It is broken at the card width; cites TU-R-052 |
 | **TU-E-018** | Badges are wider than the card | The badge line is truncated; cites TU-R-052 |
-| **TU-E-019** | The board section is Jira, or credentials are missing | The Task Board tab keeps showing the configuration summary; cites TU-R-050 |
+| **TU-E-019** | The board section is Jira, or credentials are missing | The Task Board tab body stays empty; missing credentials opened the configuration dialog at start; cites TU-R-024, TU-R-050 |
 | **TU-E-020** | Enter on the Task Board tab with no selected card | Ignored; cites TU-R-059 |
 | **TU-E-021** | Issue details arrive after the overlay was closed | Discarded; cites TU-R-059 |
-| **TU-E-022** | The remote section is Bitbucket, or credentials are missing | The Git Remote tab keeps showing the configuration summary; cites TU-R-062 |
+| **TU-E-022** | The remote section is Bitbucket, or credentials are missing | The Git Remote tab body stays empty; missing credentials opened the configuration dialog at start; cites TU-R-024, TU-R-062 |
 | **TU-E-023** | The repository has no pull requests | The table shows only its header; cites TU-R-063 |
 | **TU-E-024** | A pull request has no comments | The comments card reads `No comments`; cites TU-R-066 |
 | **TU-E-025** | Pull request details arrive after the overlay was closed | Discarded; cites TU-R-065 |
