@@ -693,7 +693,7 @@ impl ReviewPanel {
 }
 
 /// Rows of the reply editor's box under the thread box, borders included.
-const REPLY_HEIGHT: u16 = 5;
+const REPLY_HEIGHT: u16 = 8;
 
 #[cfg(test)]
 mod tests {
@@ -948,8 +948,8 @@ mod tests {
         assert!(rows[0].contains(" thread "), "thread box stays: {rows:?}");
         assert!(rows.iter().any(|r| r.contains(" @octo ")), "{rows:?}");
         assert!(
-            rows[9].contains(" reply "),
-            "reply box under the thread box: {rows:?}"
+            rows[6].contains(" reply "),
+            "reply box of eight rows under the thread box: {rows:?}"
         );
         assert!(panel.advance(&[0], false), "reply back to the thread box");
         assert!(!panel.advance(&[0], false), "then out of the panel");

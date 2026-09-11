@@ -470,10 +470,12 @@ impl FilesState {
         let (diff, comment) = if panel {
             let reply = self.review.as_ref().is_some_and(|r| r.reply_open(&visible));
             let height = if reply {
-                (area.height / 2).clamp(3, 20)
+                // Half the tab for the thread box plus the reply editor's eight rows.
+                (area.height / 2).clamp(3, 20) + 8
             } else {
-                (area.height / 3).clamp(3, 12)
-            };
+                (area.height / 3).clamp(3, 12) + 5
+            }
+            .min(area.height.saturating_sub(3));
             let [diff, comment] =
                 Layout::vertical([Constraint::Min(0), Constraint::Length(height)]).areas(right);
             (diff, Some(comment))
@@ -925,9 +927,13 @@ mod tests {
         assert!(s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('c')));
         assert_eq!(s.focus(), Panel::Comment, "the editor takes the focus");
         let (rows, _) = draw(&mut s, &files, 20);
+        let top = rows
+            .iter()
+            .position(|r| r.contains(" comment "))
+            .expect("editor panel under the diff");
         assert!(
-            rows.iter().any(|r| r.contains(" comment ")),
-            "editor panel under the diff: {rows:?}"
+            20 - top >= 8,
+            "the editor box has at least eight rows: top {top}"
         );
         for key in [
             KeyCode::Char('i'),
