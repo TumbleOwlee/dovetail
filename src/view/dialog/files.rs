@@ -330,9 +330,17 @@ impl FilesState {
             .is_some_and(|r| r.panel_shown(&visible))
     }
 
-    /// Moves the focus tree → diff → comment panel → tree, the comment stop only while
-    /// its panel is shown.
+    /// Moves the focus tree → diff → thread box → reply editor (while one is open) →
+    /// tree, the comment stops only while the panel is shown.
     fn cycle_focus(&mut self, files: &[ChangedFile], forward: bool) {
+        let visible = self.visible_threads(files);
+        if self.focus == Panel::Comment
+            && let Some(review) = &mut self.review
+            && review.advance(&visible, forward)
+        {
+            self.set_focus(files, Panel::Comment);
+            return;
+        }
         let comment = self.panel_shown(files);
         let next = match (self.focus, forward) {
             (Panel::Tree, true) => Panel::Diff,
@@ -343,6 +351,11 @@ impl FilesState {
             (Panel::Diff, false) => Panel::Tree,
             (Panel::Comment, false) => Panel::Diff,
         };
+        if next == Panel::Comment
+            && let Some(review) = &mut self.review
+        {
+            review.enter(&visible, forward);
+        }
         self.set_focus(files, next);
     }
 
@@ -455,7 +468,12 @@ impl FilesState {
             .as_ref()
             .is_some_and(|r| r.panel_shown(&visible));
         let (diff, comment) = if panel {
-            let height = (area.height / 3).clamp(3, 12);
+            let reply = self.review.as_ref().is_some_and(|r| r.reply_open(&visible));
+            let height = if reply {
+                (area.height / 2).clamp(3, 20)
+            } else {
+                (area.height / 3).clamp(3, 12)
+            };
             let [diff, comment] =
                 Layout::vertical([Constraint::Min(0), Constraint::Length(height)]).areas(right);
             (diff, Some(comment))
@@ -1044,6 +1062,82 @@ mod tests {
         assert!(
             !rows.iter().any(|r| r.contains("omega")),
             "back to clipped: {rows:?}"
+        );
+    }
+
+    #[test]
+    /// TU-R-081, TU-R-083 — with a remote thread's line selected the panel shows the thread box; `r` opens the reply box under it and Tab cycles tree → diff → thread box → reply box → tree; the panel grows to half the tab height while the reply box is open.
+    fn ut_thread_and_reply_focus_cycle() {
+        let thread = ReviewThread {
+            id: "T_1".into(),
+            path: "a.rs".into(),
+            side: crate::github::review::Side::Right,
+            start_line: 2,
+            line: 2,
+            resolved: false,
+            outdated: false,
+            comments: vec![crate::github::pull::ThreadComment {
+                author: Some("octo".into()),
+                body: "why?".into(),
+            }],
+        };
+        let files = vec![file(
+            "a.rs",
+            FileStatus::Modified,
+            Some("@@ -1,3 +1,3 @@\n fn main() {\n-    old();\n+    new();\n }\n"),
+        )];
+        let mut s = FilesState::with_review(&files, &[thread]);
+        s.take_request();
+        s.review_mut().expect("review").active = true;
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        for _ in 0..2 {
+            s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        }
+        let (rows, _) = draw(&mut s, &files, 24);
+        assert!(
+            rows.iter().any(|r| r.contains(" thread "))
+                && rows.iter().any(|r| r.contains(" @octo ")),
+            "thread box shown on the marked line: {rows:?}"
+        );
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(s.focus(), Panel::Comment);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('r'));
+        let (rows, _) = draw(&mut s, &files, 24);
+        assert!(
+            rows.iter().any(|r| r.contains(" thread "))
+                && rows.iter().any(|r| r.contains(" reply ")),
+            "thread box stays over the reply box: {rows:?}"
+        );
+        let panel_top = rows
+            .iter()
+            .position(|r| r.contains(" thread "))
+            .expect("top");
+        assert!(
+            (24 - panel_top as u16) >= 12,
+            "panel grew to half the tab: top {panel_top}"
+        );
+        for key in [
+            KeyCode::Char('i'),
+            KeyCode::Char('o'),
+            KeyCode::Char('k'),
+            KeyCode::Esc,
+        ] {
+            s.handle_key(&files, KeyModifiers::NONE, key);
+        }
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab);
+        assert_eq!(s.focus(), Panel::Comment, "reply back to the thread box");
+        assert!(
+            s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j')),
+            "thread box consumes scroll keys"
+        );
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(s.focus(), Panel::Comment, "thread box forward to the reply");
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(s.focus(), Panel::Tree, "reply forward leaves the panel");
+        assert_eq!(
+            s.review().expect("review").pending().1[0].body,
+            "ok",
+            "leaving the panel saved the reply"
         );
     }
 }

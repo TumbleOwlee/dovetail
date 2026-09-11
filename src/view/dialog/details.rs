@@ -120,6 +120,14 @@ fn commit_blob_ref(panes: &Panes, sha: String, path: String) -> Option<BlobRef> 
     }
 }
 
+/// A pull request whose details to request anew.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestRef {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+}
+
 /// A commit whose changed files to request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitRef {
@@ -551,24 +559,35 @@ impl DetailsDialog {
         }
     }
 
-    /// Applies a finished review request's outcome to the panel and the status line.
-    pub fn handle_review(&mut self, result: ReviewResult) {
+    /// Applies a finished review request's outcome to the panel and the status line;
+    /// a successful submit answers the repository coordinates whose pull request
+    /// details the caller requests anew.
+    pub fn handle_review(&mut self, result: ReviewResult) -> Option<PullRequestRef> {
         let Content::Loaded { content, files, .. } = &mut self.content else {
-            return;
+            return None;
         };
-        let changed: &[ChangedFile] = match &content.panes {
-            Panes::Conversation => &[],
-            Panes::Pull { files, .. } => files,
+        let (changed, coordinates): (&[ChangedFile], _) = match &content.panes {
+            Panes::Conversation => (&[], None),
+            Panes::Pull {
+                files, owner, repo, ..
+            } => (
+                files,
+                Some(PullRequestRef {
+                    owner: owner.clone(),
+                    repo: repo.clone(),
+                    number: self.number,
+                }),
+            ),
         };
-        let Some(review) = files.review_mut() else {
-            return;
-        };
+        let review = files.review_mut()?;
         review.submitting = false;
+        let mut refetch = None;
         match result.outcome {
             Ok(ReviewOutcome::Submitted) => {
                 review.clear_local();
                 review.active = false;
                 review.review_id = None;
+                refetch = coordinates;
             }
             // Discarding already ended review mode locally; a failure below only reports.
             Ok(ReviewOutcome::Discarded) => {}
@@ -581,6 +600,7 @@ impl DetailsDialog {
             }
         }
         files.sync_marks_for(changed);
+        refetch
     }
 
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
@@ -723,7 +743,7 @@ impl CardText {
 
 /// A read-only, unfocused markdown state holding `body` plus one trailing empty line, with the
 /// active line at the top or on that trailing line.
-fn markdown_state(body: &str, active_last: bool) -> MarkdownInputFieldState {
+pub(crate) fn markdown_state(body: &str, active_last: bool) -> MarkdownInputFieldState {
     let mut inner = CodeInputFieldStateBuilder::default()
         .vim(true)
         .focused(false)
@@ -743,7 +763,7 @@ fn markdown_state(body: &str, active_last: bool) -> MarkdownInputFieldState {
         .expect("MarkdownInputFieldState fields all default")
 }
 
-fn markdown_widget() -> MarkdownInputField {
+pub(crate) fn markdown_widget() -> MarkdownInputField {
     MarkdownInputFieldBuilder::default()
         .style(theme::input_field_style())
         .build()
@@ -753,7 +773,7 @@ fn markdown_widget() -> MarkdownInputField {
 /// The display rows `body` wraps to at `width`, measured by the widget itself: rendered one
 /// row tall with the active line on the trailing empty line, its row scroll settles on the
 /// number of rows before that line.
-fn markdown_rows(body: &str, width: u16) -> u16 {
+pub(crate) fn markdown_rows(body: &str, width: u16) -> u16 {
     if body.trim().is_empty() || width == 0 {
         return 0;
     }
@@ -2076,7 +2096,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-080, TU-R-084, TU-E-052, TU-E-054, TU-E-055, TU-E-057 — `review` activates review mode and the bottom row shows ` REVIEW ` on the purple background; `submit` with no drafts sends the verdict and summary alone and locks the review while it runs; a failed submit keeps review mode with the created review id, a successful one ends it; `discard` outside review mode notices, inside it drops the held review; `q` still closes the overlay.
+    /// TU-R-080, TU-R-084, TU-E-052, TU-E-054, TU-E-055, TU-E-057 — `review` activates review mode and the bottom row shows ` REVIEW ` on the purple background; `submit` with no drafts sends the verdict and summary alone and locks the review while it runs; a failed submit keeps review mode with the created review id, a successful one ends it and yields the pull request reference to refetch; `discard` outside review mode notices, inside it drops the held review; `q` still closes the overlay.
     fn ut_review_submit_and_discard() {
         let mut d = pull_dialog();
         d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
@@ -2129,12 +2149,16 @@ mod tests {
         );
         assert_eq!(command(&mut d, "discard"), DetailsEvent::Consumed);
         dismiss(&mut d, "review busy");
-        d.handle_review(ReviewResult {
-            review_id: Some("R_1".into()),
-            added: 0,
-            replied: 0,
-            outcome: Err(crate::github::GithubError::Status(502)),
-        });
+        assert_eq!(
+            d.handle_review(ReviewResult {
+                review_id: Some("R_1".into()),
+                added: 0,
+                replied: 0,
+                outcome: Err(crate::github::GithubError::Status(502)),
+            }),
+            None,
+            "a failure refetches nothing"
+        );
         dismiss(&mut d, "review failed: github: HTTP 502");
         assert_eq!(
             status_row(&mut d).trim_matches(['│', ' ']),
@@ -2151,12 +2175,16 @@ mod tests {
             !status_row(&mut d).contains("REVIEW"),
             "discard ends review mode"
         );
-        d.handle_review(ReviewResult {
-            review_id: None,
-            added: 0,
-            replied: 0,
-            outcome: Ok(ReviewOutcome::Discarded),
-        });
+        assert_eq!(
+            d.handle_review(ReviewResult {
+                review_id: None,
+                added: 0,
+                replied: 0,
+                outcome: Ok(ReviewOutcome::Discarded),
+            }),
+            None,
+            "a discard refetches nothing"
+        );
 
         assert_eq!(command(&mut d, "review"), DetailsEvent::Consumed);
         assert!(matches!(
@@ -2166,12 +2194,20 @@ mod tests {
                 ..
             })
         ));
-        d.handle_review(ReviewResult {
-            review_id: None,
-            added: 0,
-            replied: 0,
-            outcome: Ok(ReviewOutcome::Submitted),
-        });
+        assert_eq!(
+            d.handle_review(ReviewResult {
+                review_id: None,
+                added: 0,
+                replied: 0,
+                outcome: Ok(ReviewOutcome::Submitted),
+            }),
+            Some(PullRequestRef {
+                owner: "o".into(),
+                repo: "r".into(),
+                number: 5,
+            }),
+            "a successful submit requests the details anew"
+        );
         assert!(
             !status_row(&mut d).contains("REVIEW"),
             "a successful submit ends review mode"

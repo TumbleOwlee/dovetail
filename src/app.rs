@@ -18,7 +18,9 @@ use crate::view::board::{self, BoardView};
 use crate::view::command_line::{CommandLine, CommandLineEvent};
 use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteForm};
 use crate::view::dialog::config::{Choice, Field};
-use crate::view::dialog::details::{BlobRef, CommitRef, DetailsDialog, DetailsEvent, Link};
+use crate::view::dialog::details::{
+    BlobRef, CommitRef, DetailsDialog, DetailsEvent, Link, PullRequestRef,
+};
 use crate::view::dialog::{issue, pull};
 use crate::view::notice;
 use crate::view::remote::RemoteView;
@@ -343,6 +345,23 @@ impl App {
         });
     }
 
+    /// Queues the pull request details request anew, with either GitHub token.
+    fn request_pull(&mut self, pull: PullRequestRef) {
+        let Some(token) = self
+            .github_remote()
+            .map(|(_, _, t)| t)
+            .or_else(|| self.github_board().map(|(_, _, t)| t))
+        else {
+            return;
+        };
+        self.pending_fetches.push(FetchRequest::PullRequest {
+            token: token.to_string(),
+            owner: pull.owner,
+            repo: pull.repo,
+            number: pull.number,
+        });
+    }
+
     /// Fetches queued since the last call, for the loop to run.
     pub fn take_fetch_requests(&mut self) -> Vec<FetchRequest> {
         std::mem::take(&mut self.pending_fetches)
@@ -387,8 +406,10 @@ impl App {
             return;
         }
         if let Message::Review(result) = message {
-            if let Some(dialog) = self.pull.as_mut() {
-                dialog.handle_review(result);
+            if let Some(dialog) = self.pull.as_mut()
+                && let Some(pull) = dialog.handle_review(result)
+            {
+                self.request_pull(pull);
             }
             return;
         }

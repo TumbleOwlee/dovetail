@@ -13,10 +13,11 @@ use ferrowl_ui::widgets::{MarkdownInputFieldBuilder, TabBarBuilder};
 use ferrowl_ui::{Border, EventResult};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
-use ratatui::widgets::StatefulWidget;
+use ratatui::widgets::{Block, StatefulWidget, Widget as RenderWidget};
 
 use crate::github::pull::{ReviewThread, ThreadComment};
 use crate::github::review::{Reply, Side as ApiSide, Thread as ApiThread};
+use crate::view::dialog::details::{markdown_rows, markdown_state, markdown_widget};
 use crate::view::theme;
 
 /// One comment thread shown on the diff.
@@ -82,28 +83,27 @@ impl UiThread {
         }
     }
 
-    /// The read-only markdown shown for the thread: each comment as an `@author` heading
-    /// with its body, a pending reply under a `pending reply` caption.
-    fn rendered(&self) -> String {
+    /// The thread box's comment boxes: one `(title, markdown body)` per comment, the
+    /// pending reply last unless an editor holds it.
+    fn boxes(&self, with_reply: bool) -> Vec<(String, String)> {
         match self {
-            UiThread::Draft { body, .. } => body.clone(),
+            UiThread::Draft { body, .. } => vec![(" comment ".to_string(), body.clone())],
             UiThread::Remote {
                 comments, reply, ..
             } => {
-                let mut parts: Vec<String> = comments
+                let mut boxes: Vec<(String, String)> = comments
                     .iter()
                     .map(|c| {
-                        format!(
-                            "**@{}**\n\n{}",
-                            c.author.as_deref().unwrap_or("ghost"),
-                            c.body
+                        (
+                            format!(" @{} ", c.author.as_deref().unwrap_or("ghost")),
+                            c.body.clone(),
                         )
                     })
                     .collect();
-                if let Some(reply) = reply {
-                    parts.push(format!("**pending reply**\n\n{reply}"));
+                if with_reply && let Some(reply) = reply {
+                    boxes.push((" pending reply ".to_string(), reply.clone()));
                 }
-                parts.join("\n\n---\n\n")
+                boxes
             }
         }
     }
@@ -132,6 +132,12 @@ pub struct ReviewPanel {
     shown: Option<(usize, MarkdownInputFieldState)>,
     /// Index into the visible threads of the shown tab.
     tab: usize,
+    /// The reply editor holds the panel focus instead of the thread box.
+    reply_focused: bool,
+    /// The thread box's row scroll, clamped by the render.
+    scroll: usize,
+    /// A leading `g` awaiting its second, for `gg`.
+    pending_g: bool,
     notice: Option<String>,
 }
 
@@ -171,6 +177,9 @@ impl ReviewPanel {
             editor: None,
             shown: None,
             tab: 0,
+            reply_focused: false,
+            scroll: 0,
+            pending_g: false,
             notice: None,
         }
     }
@@ -258,6 +267,7 @@ impl ReviewPanel {
             UiThread::Remote { reply, .. } => reply.clone().unwrap_or_default(),
         };
         self.editor = Some((index, field(false, &content, true)));
+        self.reply_focused = matches!(self.threads[index], UiThread::Remote { .. });
         self.shown = None;
     }
 
@@ -280,6 +290,7 @@ impl ReviewPanel {
                 *reply = (!content.is_empty()).then_some(content);
             }
         }
+        self.reply_focused = false;
         self.shown = None;
     }
 
@@ -297,12 +308,60 @@ impl ReviewPanel {
             }
         } else {
             self.save_editor();
+            self.reply_focused = false;
         }
+        let editing = focused && self.editor_focused(visible);
         if let Some((_, state)) = &mut self.editor {
-            state.set_focused(focused);
+            state.set_focused(editing);
         }
         if let Some((_, state)) = &mut self.shown {
             state.set_focused(focused);
+        }
+    }
+
+    /// Whether an open editor holds the panel focus: a draft's always does, a reply's
+    /// only while the reply stop is focused.
+    fn editor_focused(&self, visible: &[usize]) -> bool {
+        match (&self.editor, self.current(visible)) {
+            (Some(_), Some(index)) => {
+                matches!(self.threads[index], UiThread::Draft { .. }) || self.reply_focused
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the panel has a thread-box stop and a reply-editor stop.
+    fn two_stops(&self, visible: &[usize]) -> bool {
+        self.editor.is_some()
+            && self
+                .current(visible)
+                .is_some_and(|i| matches!(self.threads[i], UiThread::Remote { .. }))
+    }
+
+    /// Whether the reply editor takes rows under the thread box.
+    pub fn reply_open(&self, visible: &[usize]) -> bool {
+        self.two_stops(visible)
+    }
+
+    /// Puts the panel focus on its first stop entering forward, its last entering
+    /// backward.
+    pub fn enter(&mut self, visible: &[usize], forward: bool) {
+        self.reply_focused = self.two_stops(visible) && !forward;
+    }
+
+    /// Moves the focus to the panel's next stop; `false` when it leaves the panel.
+    pub fn advance(&mut self, visible: &[usize], forward: bool) -> bool {
+        if !self.two_stops(visible) {
+            return false;
+        }
+        if forward && !self.reply_focused {
+            self.reply_focused = true;
+            true
+        } else if !forward && self.reply_focused {
+            self.reply_focused = false;
+            true
+        } else {
+            false
         }
     }
 
@@ -343,7 +402,7 @@ impl ReviewPanel {
                 }
                 PanelEvent::Consumed
             }
-            (KeyModifiers::CONTROL, KeyCode::Char('d')) if self.editor.is_some() => {
+            (KeyModifiers::CONTROL, KeyCode::Char('d')) if self.editor_focused(visible) => {
                 if let Some((_, state)) = &mut self.editor {
                     // Delete through the editor's own vim pipeline so `u` restores it.
                     for (m, k) in [
@@ -360,11 +419,19 @@ impl ReviewPanel {
                 PanelEvent::Consumed
             }
             _ => {
-                if let Some((_, state)) = &mut self.editor {
+                if self.editor_focused(visible)
+                    && let Some((_, state)) = &mut self.editor
+                {
                     return match state.handle_events(modifiers, code) {
                         EventResult::Consumed => PanelEvent::Consumed,
                         EventResult::Unhandled(..) => PanelEvent::ToDiff,
                     };
+                }
+                if self
+                    .current(visible)
+                    .is_some_and(|i| matches!(self.threads[i], UiThread::Remote { .. }))
+                {
+                    return self.scroll_key(modifiers, code);
                 }
                 if let Some((_, state)) = &mut self.shown {
                     return match state.handle_events(modifiers, code) {
@@ -374,6 +441,34 @@ impl ReviewPanel {
                 }
                 PanelEvent::ToDiff
             }
+        }
+    }
+
+    /// `j`, `k`, `gg` and `G` on the focused thread box; the render clamps the offset.
+    fn scroll_key(&mut self, modifiers: KeyModifiers, code: KeyCode) -> PanelEvent {
+        let leading_g = std::mem::take(&mut self.pending_g);
+        match (modifiers, code) {
+            (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down) => {
+                self.scroll = self.scroll.saturating_add(1);
+                PanelEvent::Consumed
+            }
+            (KeyModifiers::NONE, KeyCode::Char('k') | KeyCode::Up) => {
+                self.scroll = self.scroll.saturating_sub(1);
+                PanelEvent::Consumed
+            }
+            (KeyModifiers::NONE, KeyCode::Char('g')) => {
+                if leading_g {
+                    self.scroll = 0;
+                } else {
+                    self.pending_g = true;
+                }
+                PanelEvent::Consumed
+            }
+            (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char('G')) => {
+                self.scroll = usize::MAX;
+                PanelEvent::Consumed
+            }
+            _ => PanelEvent::ToDiff,
         }
     }
 
@@ -440,6 +535,8 @@ impl ReviewPanel {
         });
         self.editor = None;
         self.shown = None;
+        self.reply_focused = false;
+        self.scroll = 0;
     }
 
     /// Drops every draft and pending reply.
@@ -453,6 +550,8 @@ impl ReviewPanel {
         });
         self.editor = None;
         self.shown = None;
+        self.reply_focused = false;
+        self.scroll = 0;
     }
 
     /// Renders the tab bar and the current thread into `area`.
@@ -482,31 +581,119 @@ impl ReviewPanel {
             return;
         };
         let editing = self.editor.as_ref().is_some_and(|(t, _)| *t == index);
-        let title = match (&self.threads[index], editing) {
-            (UiThread::Draft { .. }, _) => " comment ",
-            (UiThread::Remote { .. }, true) => " reply ",
-            (UiThread::Remote { .. }, false) => " thread ",
+        let remote = matches!(self.threads[index], UiThread::Remote { .. });
+        let editor_widget = |title: &str| {
+            MarkdownInputFieldBuilder::default()
+                .border(Border::Full(Margin::new(1, 0)))
+                .title(Some(title.into()))
+                .style(theme::input_field_style())
+                .build()
+                .expect("MarkdownInputField fields all default")
         };
-        let widget = MarkdownInputFieldBuilder::default()
-            .border(Border::Full(Margin::new(1, 0)))
-            .title(Some(title.into()))
-            .style(theme::input_field_style())
-            .build()
-            .expect("MarkdownInputField fields all default");
+        if remote {
+            let (thread_area, reply_area) = if editing {
+                let [thread, reply] =
+                    Layout::vertical([Constraint::Min(0), Constraint::Length(REPLY_HEIGHT)])
+                        .areas(body);
+                (thread, Some(reply))
+            } else {
+                (body, None)
+            };
+            self.render_thread_box(index, editing, focused, thread_area, buf);
+            if let (Some(reply), Some((_, state))) = (reply_area, &mut self.editor) {
+                StatefulWidget::render(&editor_widget(" reply "), reply, buf, state);
+            }
+            return;
+        }
         if editing {
             if let Some((_, state)) = &mut self.editor {
-                StatefulWidget::render(&widget, body, buf, state);
+                StatefulWidget::render(&editor_widget(" comment "), body, buf, state);
             }
             return;
         }
         if self.shown.as_ref().is_none_or(|(t, _)| *t != index) {
-            self.shown = Some((index, field(true, &self.threads[index].rendered(), focused)));
+            let body_text = match &self.threads[index] {
+                UiThread::Draft { body, .. } => body.clone(),
+                UiThread::Remote { .. } => String::new(),
+            };
+            self.shown = Some((index, field(true, &body_text, focused)));
         }
         if let Some((_, state)) = &mut self.shown {
-            StatefulWidget::render(&widget, body, buf, state);
+            StatefulWidget::render(&editor_widget(" comment "), body, buf, state);
         }
     }
+
+    /// The scrollable thread box: one bordered box per comment, blitted through a scratch
+    /// buffer so a box can straddle the viewport's edges.
+    fn render_thread_box(
+        &mut self,
+        index: usize,
+        editing: bool,
+        focused: bool,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        let color = if focused && !self.editor_focused_at(index) {
+            theme::TEMPLATE.hi
+        } else {
+            theme::TEMPLATE.border
+        };
+        let block = Block::bordered()
+            .style(theme::on_bg(color))
+            .title(" thread ");
+        let inner = block.inner(area).inner(Margin::new(1, 0));
+        block.render(area, buf);
+        if inner.width < 5 || inner.height == 0 {
+            return;
+        }
+        let boxes = self.threads[index].boxes(!editing);
+        let text_width = inner.width.saturating_sub(4).max(1);
+        let heights: Vec<u16> = boxes
+            .iter()
+            .map(|(_, body)| markdown_rows(body, text_width) + 2)
+            .collect();
+        let total: usize = heights.iter().map(|h| *h as usize).sum();
+        self.scroll = self.scroll.min(total.saturating_sub(inner.height as usize));
+        let scratch_area = Rect::new(0, 0, inner.width, (total as u16).clamp(1, 512));
+        let mut scratch = Buffer::empty(scratch_area);
+        scratch.set_style(scratch_area, theme::base());
+        let mut y = 0u16;
+        for ((title, body), height) in boxes.iter().zip(&heights) {
+            if y >= scratch_area.height {
+                break;
+            }
+            let rect = Rect::new(0, y, inner.width, (*height).min(scratch_area.height - y));
+            let comment = Block::bordered()
+                .style(theme::on_bg(theme::TEMPLATE.border))
+                .title(title.clone());
+            let text = comment.inner(rect).inner(Margin::new(1, 0));
+            comment.render(rect, &mut scratch);
+            if text.width > 0 && text.height > 0 {
+                let mut state = markdown_state(body, false);
+                StatefulWidget::render(&markdown_widget(), text, &mut scratch, &mut state);
+            }
+            y += height;
+        }
+        for row in 0..inner.height {
+            let src = row as usize + self.scroll;
+            if src >= scratch_area.height as usize {
+                break;
+            }
+            for col in 0..inner.width {
+                buf[(inner.x + col, inner.y + row)] = scratch[(col, src as u16)].clone();
+            }
+        }
+    }
+
+    /// Like [`ReviewPanel::editor_focused`] with the current index already known.
+    fn editor_focused_at(&self, index: usize) -> bool {
+        self.editor.is_some()
+            && (matches!(self.threads[index], UiThread::Draft { .. }) || self.reply_focused)
+    }
 }
+
+/// Rows of the reply editor's box under the thread box, borders included.
+const REPLY_HEIGHT: u16 = 5;
 
 #[cfg(test)]
 mod tests {
@@ -684,7 +871,98 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-081 — more than one touched thread renders a horizontal tab bar captioned `draft` or `@<author>`; `[` and `]` switch the shown thread outside Insert mode; a remote thread renders read-only with `@<author>` and a `pending reply` caption.
+    /// TU-R-081 — a remote thread renders as a thread box holding one bordered box per comment titled `@<author>`; `j`/`k` and `gg`/`G` scroll the focused thread box, clamped; a pending reply shows as a last box titled `pending reply` while no editor is open.
+    fn ut_thread_box_scrolls() {
+        let mut thread = remote("T_1", 3, 5, false);
+        thread.comments = (0..6)
+            .map(|i| ThreadComment {
+                author: Some(format!("user{i}")),
+                body: format!("comment number {i}"),
+            })
+            .collect();
+        let mut panel = ReviewPanel::new(&[thread]);
+        let draw = |panel: &mut ReviewPanel| {
+            let buf = render_buffer(50, 10, |f| {
+                panel.render(&[0], true, f.area(), f.buffer_mut());
+            });
+            buffer_rows(&buf)
+        };
+        let rows = draw(&mut panel);
+        assert!(rows[0].contains(" thread "), "{rows:?}");
+        assert!(
+            rows.iter().any(|r| r.contains(" @user0 "))
+                && rows.iter().any(|r| r.contains("comment number 0")),
+            "author-titled comment boxes: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("comment number 5")),
+            "later comments below the fold: {rows:?}"
+        );
+        for _ in 0..40 {
+            panel.handle_key(&[0], KeyModifiers::NONE, KeyCode::Char('j'));
+        }
+        let rows = draw(&mut panel);
+        assert!(
+            rows.iter().any(|r| r.contains("comment number 5")),
+            "scrolled to the end, clamped: {rows:?}"
+        );
+        panel.handle_key(&[0], KeyModifiers::NONE, KeyCode::Char('g'));
+        panel.handle_key(&[0], KeyModifiers::NONE, KeyCode::Char('g'));
+        let rows = draw(&mut panel);
+        assert!(
+            rows.iter().any(|r| r.contains("comment number 0")),
+            "gg back to the top: {rows:?}"
+        );
+        panel.handle_key(&[0], KeyModifiers::SHIFT, KeyCode::Char('G'));
+        let rows = draw(&mut panel);
+        assert!(
+            rows.iter().any(|r| r.contains("comment number 5")),
+            "G to the bottom: {rows:?}"
+        );
+
+        panel.active = true;
+        panel.handle_key(&[0], KeyModifiers::NONE, KeyCode::Char('r'));
+        typed(&mut panel, &[0], "soon");
+        panel.set_focused(false, &[0]);
+        panel.handle_key(&[0], KeyModifiers::SHIFT, KeyCode::Char('G'));
+        let rows = draw(&mut panel);
+        assert!(
+            rows.iter().any(|r| r.contains(" pending reply "))
+                && rows.iter().any(|r| r.contains("soon")),
+            "pending reply as the last box: {rows:?}"
+        );
+    }
+
+    #[test]
+    /// TU-R-083 — `r` opens the reply editor in its own `reply` box under the thread box, both visible, the editor focused; Tab stops: the panel reports two stops and moves between them.
+    fn ut_reply_box_under_thread() {
+        let mut panel = ReviewPanel::new(&[remote("T_1", 3, 5, false)]);
+        panel.active = true;
+        panel.set_focused(true, &[0]);
+        panel.handle_key(&[0], KeyModifiers::NONE, KeyCode::Char('r'));
+        assert!(panel.reply_open(&[0]));
+        let buf = render_buffer(50, 14, |f| {
+            panel.render(&[0], true, f.area(), f.buffer_mut());
+        });
+        let rows = buffer_rows(&buf);
+        assert!(rows[0].contains(" thread "), "thread box stays: {rows:?}");
+        assert!(rows.iter().any(|r| r.contains(" @octo ")), "{rows:?}");
+        assert!(
+            rows[9].contains(" reply "),
+            "reply box under the thread box: {rows:?}"
+        );
+        assert!(panel.advance(&[0], false), "reply back to the thread box");
+        assert!(!panel.advance(&[0], false), "then out of the panel");
+        assert!(panel.advance(&[0], true), "thread box forward to the reply");
+        assert!(!panel.advance(&[0], true), "then out of the panel");
+        typed(&mut panel, &[0], "on it");
+        panel.set_focused(false, &[0]);
+        assert_eq!(panel.pending().1[0].body, "on it");
+        assert!(!panel.reply_open(&[0]), "saved editor closes the reply box");
+    }
+
+    #[test]
+    /// TU-R-081 — more than one touched thread renders a horizontal tab bar captioned `draft` or `@<author>`; `[` and `]` switch the shown thread outside Insert mode.
     fn ut_thread_tabs_and_readonly_render() {
         let mut panel = ReviewPanel::new(&[remote("T_1", 3, 5, false)]);
         panel.active = true;
@@ -719,15 +997,5 @@ mod tests {
             buffer_rows(&buf)[1].contains(" thread "),
             "back on the remote thread"
         );
-
-        panel.handle_key(&visible, KeyModifiers::NONE, KeyCode::Char('r'));
-        typed(&mut panel, &visible, "soon");
-        panel.save_editor();
-        let buf = render_buffer(60, 12, |f| {
-            panel.render(&visible, true, f.area(), f.buffer_mut());
-        });
-        let rows = buffer_rows(&buf);
-        assert!(rows.iter().any(|r| r.contains("pending reply")), "{rows:?}");
-        assert!(rows.iter().any(|r| r.contains("soon")), "{rows:?}");
     }
 }
