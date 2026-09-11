@@ -84,8 +84,14 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-056** | `review` while review mode is already active | `review already started` in the message popup; cites TU-R-080 |
 | **TU-E-057** | `submit` with no local drafts and no pending replies | Allowed: the review submits with the verdict and summary alone; cites TU-R-084 |
 | **TU-E-058** | An unknown command in the overlay command line | `unknown command: <input>` in the message popup; cites TU-R-079 |
-| **TU-E-059** | `submit` with arguments, with no draft, or with a blank draft on the conversation view | `usage: submit` or `no comment to submit` in the message popup; nothing is sent; cites TU-R-086 |
+| **TU-E-059** | `submit` with arguments, or with no draft and no pending edit, on the conversation view | `usage: submit` or `no comment to submit` in the message popup; nothing is sent; cites TU-R-086, TU-R-095 |
 | **TU-E-060** | `c`, `submit` or `discard` while a comment post runs | `busy` in the message popup; nothing changes; cites TU-R-086 |
 | **TU-E-061** | The overlay closes while a comment draft exists or a post runs | The draft is dropped; a comment already accepted by GitHub stays there; cites TU-R-086 |
-| **TU-E-062** | `discard` with no comment draft on the conversation view | `no comment to discard` in the message popup; cites TU-R-086 |
+| **TU-E-062** | `discard` with no comment draft and no pending edit on the conversation view | `no comment to discard` in the message popup; cites TU-R-086, TU-R-097 |
 | **TU-E-063** | `Ctrl+R` while the details overlay is still loading or failed | No request is queued; the overlay stays as is; cites TU-R-087 |
+| **TU-E-064** | `e` while the focus rests on a sidebar box or on the comment draft box | Ignored; no editor opens; cites TU-R-091 |
+| **TU-E-065** | `e` while a comment post or an edit submit runs | `busy` in the message popup; nothing changes; cites TU-R-091, TU-R-095 |
+| **TU-E-066** | Details arrive anew (`Ctrl+R`, TU-R-087, or a successful submit) while pending edits exist | Every pending edit is dropped with the replaced content and the focus returns to the first sidebar box; cites TU-R-087, TU-R-092 |
+| **TU-E-067** | The overlay closes while a pending edit exists or an edit submit runs | The pending edits are dropped; an edit already accepted by GitHub stays applied; cites TU-R-095 |
+| **TU-E-068** | The viewer may update neither the body nor any timeline comment | The focus cycle holds only the sidebar boxes and the comment draft box while one is open; `e` never reaches an editable box; cites TU-R-089 |
+| **TU-E-069** | A submit fails partway through the draft and the pending edits | The posts and edits GitHub already accepted stay applied, the unsent draft and pending edits stay local so a retry sends only those, and the error shows in the message popup; cites TU-R-095 |

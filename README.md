@@ -1,4 +1,8 @@
-# prodgy
+![Banner](./images/dovetail-banner.svg)
+
+# dovetail - Workflow TUI
+
+[![Claude](https://img.shields.io/badge/Claude-D97757?logo=claude&logoColor=fff)](#)
 
 TUI application to combine full workflow in a single application. Supports Github (Project, Issue, PR), Atlassian (JIRA, Bitbucket) and the Spec Driven Workflow (using local task board). Provides access to all in one place without accessing any of the websites
 
