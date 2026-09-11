@@ -17,6 +17,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, StatefulWidget, Widget};
 
 use crate::github::blob::Blob;
 use crate::github::board::Label;
+use crate::github::comment::{CommentAction, CommentResult};
 use crate::github::files::ChangedFile;
 use crate::github::pull::{Commit, ReviewState, ReviewThread};
 use crate::github::review::{ReviewAction, ReviewOutcome, ReviewResult, Verdict};
@@ -207,11 +208,8 @@ pub enum DetailsEvent {
     FetchCommit(CommitRef),
     /// The caller runs this review action.
     Review(ReviewAction),
-    /// The caller posts this conversation comment.
-    Comment {
-        subject_id: String,
-        body: String,
-    },
+    /// The caller runs this conversation submit.
+    Submit(CommentAction),
 }
 
 /// What to request anew after a posted conversation comment.
@@ -712,10 +710,11 @@ impl DetailsDialog {
                     return DetailsEvent::Consumed;
                 }
                 *posting = true;
-                DetailsEvent::Comment {
+                DetailsEvent::Submit(CommentAction {
                     subject_id: content.subject_id.clone(),
-                    body,
-                }
+                    draft: Some(body),
+                    edits: Vec::new(),
+                })
             }
             ["submit", ..] => {
                 *notice = Some("usage: submit".to_string());
@@ -759,11 +758,8 @@ impl DetailsDialog {
         })
     }
 
-    /// Applies a posted comment's outcome; success answers what to request anew.
-    pub fn handle_comment(
-        &mut self,
-        result: Result<String, crate::github::GithubError>,
-    ) -> Option<CommentRefetch> {
+    /// Applies a conversation submit's outcome; success answers what to request anew.
+    pub fn handle_submit(&mut self, result: CommentResult) -> Option<CommentRefetch> {
         let Content::Loaded {
             comment,
             comment_focused,
@@ -775,8 +771,8 @@ impl DetailsDialog {
             return None;
         };
         *posting = false;
-        match result {
-            Ok(_) => {
+        match result.outcome {
+            Ok(()) => {
                 *comment = None;
                 *comment_focused = false;
                 self.refetch()
@@ -2500,7 +2496,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-085 — Tab while the comment editor is in Insert mode indents four spaces instead of cycling the focus.
+    /// TU-R-085, TU-R-089 — Tab while the comment editor is in Insert mode indents four spaces instead of cycling the focus.
     fn ut_conversation_tab_in_insert_mode_indents() {
         let mut d = pull_dialog();
         d.handle_key(KeyModifiers::NONE, KeyCode::Char('c'));
@@ -2513,10 +2509,11 @@ mod tests {
         d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
         assert_eq!(
             command(&mut d, "submit"),
-            DetailsEvent::Comment {
+            DetailsEvent::Submit(CommentAction {
                 subject_id: "N_1".into(),
-                body: "x\n    y".into(),
-            }
+                draft: Some("x\n    y".into()),
+                edits: Vec::new(),
+            })
         );
     }
 
@@ -2565,23 +2562,29 @@ mod tests {
         d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
         assert_eq!(
             command(&mut d, "submit"),
-            DetailsEvent::Comment {
+            DetailsEvent::Submit(CommentAction {
                 subject_id: "N_1".into(),
-                body: "ok".into(),
-            }
+                draft: Some("ok".into()),
+                edits: Vec::new(),
+            })
         );
         assert_eq!(status_row(&mut d).trim_matches(['│', ' ']), "SUBMITTING");
         d.handle_key(KeyModifiers::NONE, KeyCode::Char('c'));
         dismiss(&mut d, "busy");
-        d.handle_comment(Err(crate::github::GithubError::Status(502)));
+        d.handle_submit(CommentResult {
+            posted: false,
+            edited: 0,
+            outcome: Err(crate::github::GithubError::Status(502)),
+        });
         dismiss(&mut d, "comment failed: github: HTTP 502");
         assert!(shows(&mut d, " comment "), "a failure keeps the draft");
-        assert!(matches!(
-            command(&mut d, "submit"),
-            DetailsEvent::Comment { .. }
-        ));
+        assert!(matches!(command(&mut d, "submit"), DetailsEvent::Submit(_)));
         assert_eq!(
-            d.handle_comment(Ok("IC_1".into())),
+            d.handle_submit(CommentResult {
+                posted: true,
+                edited: 0,
+                outcome: Ok(()),
+            }),
             Some(CommentRefetch::Pull(PullRequestRef {
                 owner: "o".into(),
                 repo: "r".into(),
@@ -2598,12 +2601,13 @@ mod tests {
             d.handle_key(KeyModifiers::NONE, key);
         }
         d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
-        assert!(matches!(
-            command(&mut d, "submit"),
-            DetailsEvent::Comment { .. }
-        ));
+        assert!(matches!(command(&mut d, "submit"), DetailsEvent::Submit(_)));
         assert_eq!(
-            d.handle_comment(Ok("IC_2".into())),
+            d.handle_submit(CommentResult {
+                posted: true,
+                edited: 0,
+                outcome: Ok(()),
+            }),
             Some(CommentRefetch::Issue("N_1".into())),
             "an issue overlay refetches by node id"
         );

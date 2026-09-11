@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use crate::app::{App, FetchRequest};
 use crate::atlassian::{self, AtlassianError, JiraProject};
 use crate::github::blob::Blob;
+use crate::github::comment::CommentResult;
 use crate::github::files::ChangedFile;
 use crate::github::issue::Issue;
 use crate::github::pull::PullDetails;
@@ -36,8 +37,8 @@ pub enum Message {
     },
     /// A review mutation's outcome, for the open pull request overlay.
     Review(ReviewResult),
-    /// A posted conversation comment's outcome, for the posting overlay.
-    CommentPosted(Result<String, GithubError>),
+    /// A conversation submit's outcome, for the posting overlay.
+    CommentSubmitted(CommentResult),
 }
 
 /// Performs one fetch and sends its outcome; a dropped receiver ends it silently.
@@ -95,12 +96,8 @@ pub async fn dispatch(request: FetchRequest, client: reqwest::Client, tx: mpsc::
         FetchRequest::Review { token, action } => {
             Message::Review(github::review::run(&client, &token, action).await)
         }
-        FetchRequest::Comment {
-            token,
-            subject_id,
-            body,
-        } => {
-            Message::CommentPosted(github::comment::post(&client, &token, &subject_id, &body).await)
+        FetchRequest::Comment { token, action } => {
+            Message::CommentSubmitted(github::comment::run(&client, &token, action).await)
         }
     };
     let _ = tx.send(message).await;

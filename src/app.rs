@@ -14,6 +14,7 @@ use crate::config::{
     store,
 };
 use crate::event::Message;
+use crate::github::comment::CommentAction;
 use crate::github::review::ReviewAction;
 use crate::view::board::{self, BoardView};
 use crate::view::command_line;
@@ -80,8 +81,7 @@ pub enum FetchRequest {
     },
     Comment {
         token: String,
-        subject_id: String,
-        body: String,
+        action: CommentAction,
     },
 }
 
@@ -452,8 +452,8 @@ impl App {
         });
     }
 
-    /// Queues a conversation comment post, with either GitHub token.
-    fn request_comment(&mut self, subject_id: String, body: String) {
+    /// Queues a conversation submit, with either GitHub token.
+    fn request_submit(&mut self, action: CommentAction) {
         let Some(token) = self
             .github_remote()
             .map(|(_, _, t)| t)
@@ -463,8 +463,7 @@ impl App {
         };
         self.pending_fetches.push(FetchRequest::Comment {
             token: token.to_string(),
-            subject_id,
-            body,
+            action,
         });
     }
 
@@ -528,13 +527,13 @@ impl App {
             }
             return;
         }
-        if let Message::CommentPosted(result) = message {
+        if let Message::CommentSubmitted(result) = message {
             let dialog = match self.overlay.as_mut() {
                 Some(Overlay::Pull(d) | Overlay::Issue(d)) if d.posting() => Some(d),
                 _ => None,
             };
             if let Some(dialog) = dialog {
-                match dialog.handle_comment(result) {
+                match dialog.handle_submit(result) {
                     Some(CommentRefetch::Pull(pull)) => self.request_pull(pull),
                     Some(CommentRefetch::Issue(id)) => self.request_issue_by_id(id),
                     None => {}
@@ -590,7 +589,7 @@ impl App {
             | Message::Blob { .. }
             | Message::CommitFiles { .. }
             | Message::Review(_)
-            | Message::CommentPosted(_) => {
+            | Message::CommentSubmitted(_) => {
                 unreachable!("handled above")
             }
         };
@@ -663,9 +662,9 @@ impl App {
                     self.overlay = None;
                     self.open_link(link);
                 }
-                Routed::Issue(DetailsEvent::Comment { subject_id, body })
-                | Routed::Pull(DetailsEvent::Comment { subject_id, body }) => {
-                    self.request_comment(subject_id, body);
+                Routed::Issue(DetailsEvent::Submit(action))
+                | Routed::Pull(DetailsEvent::Submit(action)) => {
+                    self.request_submit(action);
                 }
                 Routed::Pull(DetailsEvent::Fetch(blob)) => self.request_blob(Some(blob)),
                 Routed::Pull(DetailsEvent::FetchCommit(commit)) => self.request_commit(commit),
