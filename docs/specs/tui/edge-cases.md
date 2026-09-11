@@ -78,7 +78,7 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-050** | A commit file list arrives for a commit never requested, or after the overlay closed | Discarded; cites TU-R-078 |
 | **TU-E-051** | `submit` with a missing or unknown verdict | `usage: submit approve\|changes\|comment [summary]` in the status line; nothing is sent; cites TU-R-084 |
 | **TU-E-052** | `submit` or `discard` while review mode is inactive, or `c`/`r` outside review mode | `no review: run :review` in the status line; nothing changes; cites TU-R-080, TU-R-082, TU-R-083 |
-| **TU-E-053** | `c` while the diff shows a notice, or on rows with no file line on the focused side | `no line to comment` in the status line; no draft is created; cites TU-R-082 |
+| **TU-E-053** | `c` while the diff shows a notice, or on rows with no file line on either side | `no line to comment` in the status line; no draft is created; cites TU-R-082 |
 | **TU-E-054** | `submit` or `discard` while a submit request runs, or `c`/`r` while it runs | `review busy` in the status line; nothing changes; cites TU-R-084 |
 | **TU-E-055** | The overlay closes while review mode is active | Local drafts, pending replies and a held review id are dropped; a review created on GitHub stays there; cites TU-R-084 |
 | **TU-E-056** | `review` while review mode is already active | `review already started` in the status line; cites TU-R-080 |

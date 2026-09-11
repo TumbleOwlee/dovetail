@@ -351,10 +351,12 @@ impl FilesState {
             review.set_notice("no line to comment");
             return;
         };
-        let side = state.focused_side();
-        let lines = match side {
-            Side::Old => old,
-            Side::New => new,
+        // The new side wherever the selection has file lines there; removed-only
+        // selections fall back to the old side.
+        let (lines, side) = if new.is_empty() {
+            (old, Side::Old)
+        } else {
+            (new, Side::New)
         };
         let (Some(first), Some(last), Some(path)) = (lines.iter().min(), lines.iter().max(), path)
         else {
@@ -922,6 +924,67 @@ mod tests {
             s.review().and_then(|r| r.notice()),
             Some("no line to comment"),
             "TU-E-053"
+        );
+    }
+
+    #[test]
+    /// TU-R-082, TU-E-053 — `c` on a visual range of added lines drafts on the new side with the file's line numbers; on removed-only lines it drafts on the old side; on a hunk header alone it notices `no line to comment`.
+    fn ut_comment_side_from_selection() {
+        let files = vec![file(
+            "a.rs",
+            FileStatus::Modified,
+            Some("@@ -1,3 +1,4 @@\n one\n+alpha\n+beta\n-gone\n two\n"),
+        )];
+        let mut s = FilesState::with_review(&files, &[]);
+        s.take_request();
+        s.review_mut().expect("review").active = true;
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        assert!(s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('c')));
+        assert_eq!(
+            s.review().and_then(|r| r.notice()),
+            Some("no line to comment"),
+            "hunk header has no line"
+        );
+        for key in ['j', 'j', 'v', 'j'] {
+            s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char(key));
+        }
+        assert!(s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('c')));
+        assert_eq!(
+            s.focus(),
+            Panel::Comment,
+            "{:?}",
+            s.review().and_then(|r| r.notice())
+        );
+        for key in [KeyCode::Char('i'), KeyCode::Char('x'), KeyCode::Esc] {
+            s.handle_key(&files, KeyModifiers::NONE, key);
+        }
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        let added = &s.review().expect("review").pending().0[0];
+        assert_eq!(
+            (added.side, added.start_line, added.line),
+            (crate::github::review::Side::Right, 2, 3),
+            "added lines draft on the new side"
+        );
+
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        for key in ['j', 'c'] {
+            s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char(key));
+        }
+        assert_eq!(
+            s.focus(),
+            Panel::Comment,
+            "{:?}",
+            s.review().and_then(|r| r.notice())
+        );
+        for key in [KeyCode::Char('i'), KeyCode::Char('y'), KeyCode::Esc] {
+            s.handle_key(&files, KeyModifiers::NONE, key);
+        }
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        let removed = &s.review().expect("review").pending().0[1];
+        assert_eq!(
+            (removed.side, removed.start_line, removed.line),
+            (crate::github::review::Side::Left, 2, 2),
+            "a removed-only line drafts on the old side"
         );
     }
 }

@@ -615,26 +615,26 @@ impl DetailsDialog {
                             Layout::vertical([Constraint::Min(0), Constraint::Length(1)])
                                 .areas(inner);
                         let mut x = line.x;
-                        if *active {
+                        let style = if *active {
+                            // The purple fills the whole row while review mode is on.
+                            let purple = Style::default()
+                                .fg(theme::TEMPLATE.text_hi)
+                                .bg(theme::TEMPLATE.review);
+                            buf.set_style(line, purple);
                             let label = " REVIEW ";
-                            buf.set_stringn(
-                                x,
-                                line.y,
-                                label,
-                                line.width as usize,
-                                Style::default()
-                                    .fg(theme::TEMPLATE.text_hi)
-                                    .bg(theme::TEMPLATE.review),
-                            );
+                            buf.set_stringn(x, line.y, label, line.width as usize, purple.bold());
                             x += label.len() as u16 + 1;
-                        }
+                            purple
+                        } else {
+                            theme::base()
+                        };
                         if let Some(notice) = notice {
                             buf.set_stringn(
                                 x,
                                 line.y,
                                 notice,
                                 line.right().saturating_sub(x) as usize,
-                                theme::base(),
+                                style,
                             );
                         }
                         rest
@@ -2069,6 +2069,12 @@ mod tests {
             buf[(x, STATUS_Y)].bg,
             theme::TEMPLATE.review,
             "purple label"
+        );
+        let edges = (INSET.horizontal + 2, 100 - INSET.horizontal - 3);
+        assert_eq!(
+            (buf[(edges.0, STATUS_Y)].bg, buf[(edges.1, STATUS_Y)].bg),
+            (theme::TEMPLATE.review, theme::TEMPLATE.review),
+            "purple fills the full row"
         );
         assert!(row.contains("review started"), "{row}");
 
