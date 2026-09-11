@@ -110,11 +110,8 @@ pub struct App {
     pub settings: Option<Settings>,
     pub origin: Option<Origin>,
     pub active_tab: Tab,
-    pub dialog: Option<ConfigDialog>,
-    /// The issue details overlay while open.
-    pub issue: Option<DetailsDialog>,
-    /// The pull request details overlay while open.
-    pub pull: Option<DetailsDialog>,
+    /// The one overlay visible over the main view; either-or by construction.
+    pub overlay: Option<Overlay>,
     pub command_line: CommandLineState,
     pub board: BoardState,
     pub remote: RemoteState,
@@ -124,6 +121,13 @@ pub struct App {
     /// Ctrl+T was pressed; the next key selects a tab.
     tab_prefix: bool,
     quit: bool,
+}
+
+/// The overlays over the main view: at most one is open, which the type enforces.
+pub enum Overlay {
+    Config(Box<ConfigDialog>),
+    Issue(DetailsDialog),
+    Pull(DetailsDialog),
 }
 
 impl App {
@@ -155,9 +159,9 @@ impl App {
         settings: Option<Settings>,
         origin: Option<Origin>,
     ) -> App {
-        let dialog = settings
+        let overlay = settings
             .is_none()
-            .then(|| ConfigDialog::new(origin.as_ref()));
+            .then(|| Overlay::Config(Box::new(ConfigDialog::new(origin.as_ref()))));
         let mut app = App {
             repo_root,
             user_path,
@@ -165,9 +169,7 @@ impl App {
             settings,
             origin,
             active_tab: Tab::Board,
-            dialog,
-            issue: None,
-            pull: None,
+            overlay,
             command_line: command_line::state(),
             board: BoardState::Unavailable,
             remote: RemoteState::Unavailable,
@@ -181,7 +183,7 @@ impl App {
         let missing = app.settings.as_ref().is_some_and(|s| {
             !app.credentials_present(&s.board) || !app.credentials_present(&s.remote)
         });
-        if app.dialog.is_none() && missing {
+        if app.overlay.is_none() && missing {
             app.open_dialog();
         }
         app
@@ -262,12 +264,60 @@ impl App {
             repo: repo.to_string(),
             number: pull.number,
         };
-        self.pull = Some(DetailsDialog::new(
+        self.overlay = Some(Overlay::Pull(DetailsDialog::new(
             pull.number,
             pull.title.clone(),
             pull::LOADING,
-        ));
+        )));
         self.pending_fetches.push(request);
+    }
+
+    /// The open pull request overlay, if that is the visible one.
+    fn pull_mut(&mut self) -> Option<&mut DetailsDialog> {
+        match self.overlay.as_mut() {
+            Some(Overlay::Pull(d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The open issue overlay, if that is the visible one.
+    fn issue_mut(&mut self) -> Option<&mut DetailsDialog> {
+        match self.overlay.as_mut() {
+            Some(Overlay::Issue(d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The open configuration dialog, if that is the visible overlay.
+    fn config_mut(&mut self) -> Option<&mut ConfigDialog> {
+        match self.overlay.as_mut() {
+            Some(Overlay::Config(d)) => Some(d.as_mut()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn config_dialog(&self) -> Option<&ConfigDialog> {
+        match self.overlay.as_ref() {
+            Some(Overlay::Config(d)) => Some(d.as_ref()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn pull_dialog(&self) -> Option<&DetailsDialog> {
+        match self.overlay.as_ref() {
+            Some(Overlay::Pull(d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn issue_dialog(&self) -> Option<&DetailsDialog> {
+        match self.overlay.as_ref() {
+            Some(Overlay::Issue(d)) => Some(d),
+            _ => None,
+        }
     }
 
     /// Opens the details overlay for the selected card and queues its request.
@@ -282,11 +332,11 @@ impl App {
             token: token.to_string(),
             id: card.id.clone(),
         };
-        self.issue = Some(DetailsDialog::new(
+        self.overlay = Some(Overlay::Issue(DetailsDialog::new(
             card.number,
             card.title.clone(),
             issue::LOADING,
-        ));
+        )));
         self.pending_fetches.push(request);
     }
 
@@ -304,7 +354,11 @@ impl App {
         match link {
             Link::Issue { id, number, title } => {
                 self.active_tab = Tab::Board;
-                self.issue = Some(DetailsDialog::new(number, title, issue::LOADING));
+                self.overlay = Some(Overlay::Issue(DetailsDialog::new(
+                    number,
+                    title,
+                    issue::LOADING,
+                )));
                 self.pending_fetches.push(FetchRequest::Issue { token, id });
             }
             Link::Pull {
@@ -314,7 +368,11 @@ impl App {
                 title,
             } => {
                 self.active_tab = Tab::Remote;
-                self.pull = Some(DetailsDialog::new(number, title, pull::LOADING));
+                self.overlay = Some(Overlay::Pull(DetailsDialog::new(
+                    number,
+                    title,
+                    pull::LOADING,
+                )));
                 self.pending_fetches.push(FetchRequest::PullRequest {
                     token,
                     owner,
@@ -450,30 +508,29 @@ impl App {
             return;
         }
         if let Message::PullRequest(result) = message {
-            if let Some(dialog) = self.pull.as_mut() {
+            if let Some(dialog) = self.pull_mut() {
                 let blob = dialog.set_result(result.map(pull::content));
                 self.request_blob(blob);
             }
             return;
         }
         if let Message::Blob { oid, path, result } = message {
-            if let Some(dialog) = self.pull.as_mut() {
+            if let Some(dialog) = self.pull_mut() {
                 let blob = dialog.handle_blob(&oid, &path, result);
                 self.request_blob(blob);
             }
             return;
         }
         if let Message::CommitFiles { sha, result } = message {
-            if let Some(dialog) = self.pull.as_mut() {
+            if let Some(dialog) = self.pull_mut() {
                 let blob = dialog.handle_commit(&sha, result);
                 self.request_blob(blob);
             }
             return;
         }
         if let Message::CommentPosted(result) = message {
-            let dialog = match (self.pull.as_mut(), self.issue.as_mut()) {
-                (Some(pull), _) if pull.posting() => Some(pull),
-                (_, Some(issue)) if issue.posting() => Some(issue),
+            let dialog = match self.overlay.as_mut() {
+                Some(Overlay::Pull(d) | Overlay::Issue(d)) if d.posting() => Some(d),
                 _ => None,
             };
             if let Some(dialog) = dialog {
@@ -486,7 +543,7 @@ impl App {
             return;
         }
         if let Message::Review(result) = message {
-            if let Some(dialog) = self.pull.as_mut()
+            if let Some(dialog) = self.pull_mut()
                 && let Some(pull) = dialog.handle_review(result)
             {
                 self.request_pull(pull);
@@ -494,7 +551,7 @@ impl App {
             return;
         }
         if let Message::Issue(result) = message {
-            if let Some(dialog) = self.issue.as_mut() {
+            if let Some(dialog) = self.issue_mut() {
                 dialog.set_result(result.map(issue::content));
             }
             return;
@@ -540,7 +597,7 @@ impl App {
         match outcome {
             Ok((field, choices)) => {
                 dialog.set_options(field, choices);
-                self.dialog = Some(dialog);
+                self.overlay = Some(Overlay::Config(Box::new(dialog)));
             }
             Err(message) => {
                 self.command_line.set_error(Some(message));
@@ -563,60 +620,59 @@ impl App {
     pub fn handle_key(&mut self, modifiers: KeyModifiers, code: KeyCode) {
         self.command_line.set_error(None);
         if modifiers == KeyModifiers::CONTROL && code == KeyCode::Char('r') {
-            match self.pull.as_ref().or(self.issue.as_ref()) {
-                Some(overlay) => match overlay.refetch() {
+            match self.overlay.as_ref() {
+                Some(Overlay::Pull(d) | Overlay::Issue(d)) => match d.refetch() {
                     Some(CommentRefetch::Pull(pull)) => self.request_pull(pull),
                     Some(CommentRefetch::Issue(id)) => self.request_issue_by_id(id),
                     None => {}
                 },
-                None => self.execute(Cmd::Reload),
+                Some(Overlay::Config(_)) | None => self.execute(Cmd::Reload),
             }
             return;
         }
-        if let Some(dialog) = self.dialog.as_mut() {
-            match dialog.handle_key(modifiers, code) {
-                DialogEvent::Consumed => {}
-                DialogEvent::Confirm(board, remote) => self.confirm_dialog(board, remote),
-                DialogEvent::Cancel => {
+        enum Routed {
+            Config(DialogEvent),
+            Issue(DetailsEvent),
+            Pull(DetailsEvent),
+        }
+        let routed = match self.overlay.as_mut() {
+            None => None,
+            Some(Overlay::Config(d)) => Some(Routed::Config(d.handle_key(modifiers, code))),
+            Some(Overlay::Issue(d)) => Some(Routed::Issue(d.handle_key(modifiers, code))),
+            Some(Overlay::Pull(d)) => Some(Routed::Pull(d.handle_key(modifiers, code))),
+        };
+        if let Some(routed) = routed {
+            match routed {
+                Routed::Config(DialogEvent::Consumed) => {}
+                Routed::Config(DialogEvent::Confirm(board, remote)) => {
+                    self.confirm_dialog(board, remote);
+                }
+                Routed::Config(DialogEvent::Cancel) => {
                     if self.settings.is_none() {
                         self.quit = true;
                     } else {
-                        self.dialog = None;
+                        self.overlay = None;
                     }
                 }
-            }
-            return;
-        }
-        if let Some(issue) = self.issue.as_mut() {
-            match issue.handle_key(modifiers, code) {
-                DetailsEvent::Consumed => {}
-                DetailsEvent::Close => self.issue = None,
-                DetailsEvent::Open(link) => {
-                    self.issue = None;
+                Routed::Issue(DetailsEvent::Consumed) | Routed::Pull(DetailsEvent::Consumed) => {}
+                Routed::Issue(DetailsEvent::Close) | Routed::Pull(DetailsEvent::Close) => {
+                    self.overlay = None;
+                }
+                Routed::Issue(DetailsEvent::Open(link))
+                | Routed::Pull(DetailsEvent::Open(link)) => {
+                    self.overlay = None;
                     self.open_link(link);
                 }
-                DetailsEvent::Comment { subject_id, body } => {
+                Routed::Issue(DetailsEvent::Comment { subject_id, body })
+                | Routed::Pull(DetailsEvent::Comment { subject_id, body }) => {
                     self.request_comment(subject_id, body);
                 }
-                DetailsEvent::Fetch(_) | DetailsEvent::FetchCommit(_) | DetailsEvent::Review(_) => {
-                }
-            }
-            return;
-        }
-        if let Some(pull) = self.pull.as_mut() {
-            match pull.handle_key(modifiers, code) {
-                DetailsEvent::Consumed => {}
-                DetailsEvent::Close => self.pull = None,
-                DetailsEvent::Open(link) => {
-                    self.pull = None;
-                    self.open_link(link);
-                }
-                DetailsEvent::Fetch(blob) => self.request_blob(Some(blob)),
-                DetailsEvent::FetchCommit(commit) => self.request_commit(commit),
-                DetailsEvent::Review(action) => self.request_review(action),
-                DetailsEvent::Comment { subject_id, body } => {
-                    self.request_comment(subject_id, body);
-                }
+                Routed::Pull(DetailsEvent::Fetch(blob)) => self.request_blob(Some(blob)),
+                Routed::Pull(DetailsEvent::FetchCommit(commit)) => self.request_commit(commit),
+                Routed::Pull(DetailsEvent::Review(action)) => self.request_review(action),
+                Routed::Issue(
+                    DetailsEvent::Fetch(_) | DetailsEvent::FetchCommit(_) | DetailsEvent::Review(_),
+                ) => {}
             }
             return;
         }
@@ -692,14 +748,10 @@ impl App {
             },
         }
         StatefulWidget::render(&command_line::widget(), bottom, buf, &mut self.command_line);
-        if let Some(issue) = self.issue.as_mut() {
-            issue.render(middle, buf);
-        }
-        if let Some(pull) = self.pull.as_mut() {
-            pull.render(middle, buf);
-        }
-        if let Some(dialog) = self.dialog.as_mut() {
-            dialog.render(area, buf);
+        match self.overlay.as_mut() {
+            Some(Overlay::Issue(d) | Overlay::Pull(d)) => d.render(middle, buf),
+            Some(Overlay::Config(d)) => d.render(area, buf),
+            None => {}
         }
     }
 
@@ -741,7 +793,9 @@ impl App {
     /// Opens the dialog at once, or queues the project fetch it must wait for.
     fn open_dialog(&mut self) {
         let Some(settings) = &self.settings else {
-            self.dialog = Some(ConfigDialog::new(self.origin.as_ref()));
+            self.overlay = Some(Overlay::Config(Box::new(ConfigDialog::new(
+                self.origin.as_ref(),
+            ))));
             return;
         };
         let dialog = ConfigDialog::from_settings(settings, &self.user_config, self.origin.as_ref());
@@ -777,7 +831,7 @@ impl App {
                 self.command_line
                     .set_notice(Some("loading projects…".to_string()));
             }
-            None => self.dialog = Some(dialog),
+            None => self.overlay = Some(Overlay::Config(Box::new(dialog))),
         }
     }
 
@@ -822,12 +876,12 @@ impl App {
                     remote,
                     source: Source::UserFile,
                 });
-                self.dialog = None;
+                self.overlay = None;
                 self.request_board();
                 self.request_remote();
             }
             Err(e) => {
-                if let Some(dialog) = self.dialog.as_mut() {
+                if let Some(dialog) = self.config_mut() {
                     dialog.set_error(e.to_string());
                 }
             }
@@ -919,8 +973,8 @@ mod tests {
     /// TU-R-005 — without settings the dialog is open at start; with settings it is not.
     fn ut_starts_with_dialog_when_unconfigured() {
         let t = TempDir::new("start");
-        assert!(app(&t, None).dialog.is_some());
-        assert!(app(&t, Some(settings())).dialog.is_none());
+        assert!(app(&t, None).config_dialog().is_some());
+        assert!(app(&t, Some(settings())).config_dialog().is_none());
     }
 
     #[test]
@@ -1024,7 +1078,7 @@ mod tests {
         let mut a = app(&t, Some(settings()));
         a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('c'));
         assert!(!a.should_quit());
-        assert!(a.dialog.is_none() && !a.command_line.is_open());
+        assert!(a.config_dialog().is_none() && !a.command_line.is_open());
     }
 
     #[test]
@@ -1037,7 +1091,7 @@ mod tests {
         key(&mut a, KeyCode::Tab);
         assert_eq!(a.active_tab, Tab::Board);
         assert_eq!(
-            a.dialog.as_ref().map(|d| d.focus()),
+            a.config_dialog().map(|d| d.focus()),
             Some(Slot::Input(Field::Owner))
         );
     }
@@ -1068,13 +1122,13 @@ mod tests {
         let t = TempDir::new("config");
         let mut a = app(&t, Some(settings()));
         command(&mut a, "config");
-        assert!(a.dialog.is_none(), "waits for the project list");
+        assert!(a.config_dialog().is_none(), "waits for the project list");
         a.handle_message(Message::GithubProjects(Ok(Vec::new())));
-        let d = a.dialog.as_ref().expect("dialog");
+        let d = a.config_dialog().expect("dialog");
         assert_eq!(d.value(Field::Owner), "o");
         assert_eq!(d.value(Field::GithubToken), "t");
         key(&mut a, KeyCode::Esc);
-        assert!(a.dialog.is_none());
+        assert!(a.config_dialog().is_none());
         assert!(!a.should_quit());
         assert_eq!(a.settings, Some(settings()));
     }
@@ -1093,7 +1147,7 @@ mod tests {
         key(&mut a, KeyCode::Tab);
         type_str(&mut a, "tok");
         key(&mut a, KeyCode::Enter);
-        assert!(a.dialog.is_none());
+        assert!(a.config_dialog().is_none());
         let s = a.settings.as_ref().expect("settings applied");
         assert_eq!(s.source, Source::UserFile);
         assert_eq!(s.board.credentials(), Some("board-repo"));
@@ -1127,7 +1181,7 @@ mod tests {
             None,
             None,
         );
-        let d = a.dialog.as_mut().expect("dialog");
+        let d = a.config_mut().expect("dialog");
         for (f, v) in [
             (Field::Owner, "o"),
             (Field::Repo, "r"),
@@ -1137,7 +1191,7 @@ mod tests {
             d.set_value(f, v);
         }
         key(&mut a, KeyCode::Enter);
-        let d = a.dialog.as_ref().expect("dialog stays open");
+        let d = a.config_dialog().expect("dialog stays open");
         assert!(d.error().is_some());
         assert!(a.settings.is_none());
         assert!(a.user_config.credentials.is_empty());
@@ -1161,7 +1215,7 @@ mod tests {
         let t = TempDir::new("wnone");
         let mut a = app(&t, None);
         key(&mut a, KeyCode::Esc); // first-run Esc quits, but the command path is what's under test
-        a.dialog = None;
+        a.overlay = None;
         a.settings = None;
         command(&mut a, "w");
         assert_eq!(a.command_line.error().as_deref(), Some("not configured"));
@@ -1313,7 +1367,7 @@ mod tests {
             }]
         );
         assert!(a.take_fetch_requests().is_empty());
-        assert!(a.dialog.is_none());
+        assert!(a.config_dialog().is_none());
         let rows = render_rows(100, 30, |f| a.render(f));
         assert_eq!(rows[29].trim_start(), "loading projects…");
         key(&mut a, KeyCode::Char('x'));
@@ -1327,13 +1381,13 @@ mod tests {
         let t = TempDir::new("nofetch");
         let mut a = app(&t, None);
         assert!(a.take_fetch_requests().is_empty());
-        assert!(a.dialog.is_some());
+        assert!(a.config_dialog().is_some());
         let mut without = settings();
         without.board.set_credentials(None);
         let mut a = app(&t, Some(without));
         command(&mut a, "config");
         assert!(a.take_fetch_requests().is_empty());
-        assert!(a.dialog.is_some());
+        assert!(a.config_dialog().is_some());
     }
 
     #[test]
@@ -1346,7 +1400,7 @@ mod tests {
             number: NonZeroU64::new(1).expect("nz"),
             title: "Roadmap".into(),
         }])));
-        let d = a.dialog.as_ref().expect("dialog opened by the list");
+        let d = a.config_dialog().expect("dialog opened by the list");
         assert!(d.has_selection(Field::BoardProject));
         assert_eq!(d.value(Field::BoardProject), "1");
         let rows = render_rows(100, 30, |f| a.render(f));
@@ -1367,11 +1421,11 @@ mod tests {
             },
         );
         command(&mut a, "config");
-        assert!(a.dialog.is_none(), "waits for the project list");
+        assert!(a.config_dialog().is_none(), "waits for the project list");
         a.handle_message(Message::JiraProjects(Err(
             crate::atlassian::AtlassianError::Status(401),
         )));
-        assert!(a.dialog.is_none());
+        assert!(a.config_dialog().is_none());
         assert_eq!(a.command_line.error().as_deref(), Some("jira: HTTP 401"));
         key(&mut a, KeyCode::Char('x'));
         assert_eq!(a.command_line.error().as_deref(), None);
@@ -1386,9 +1440,9 @@ mod tests {
         command(&mut a, "config");
         command(&mut a, "config");
         assert_eq!(a.take_fetch_requests().len(), 2);
-        assert!(a.dialog.is_none());
+        assert!(a.config_dialog().is_none());
         a.handle_message(Message::GithubProjects(Ok(Vec::new())));
-        assert!(a.dialog.is_some());
+        assert!(a.config_dialog().is_some());
     }
 
     #[test]
@@ -1398,9 +1452,12 @@ mod tests {
         let mut complete = settings();
         complete.remote.set_credentials(Some("gh".into()));
         let mut a = app(&t, Some(complete));
-        assert!(a.dialog.is_none(), "complete credentials open no dialog");
+        assert!(
+            a.config_dialog().is_none(),
+            "complete credentials open no dialog"
+        );
         a.handle_message(Message::GithubProjects(Ok(Vec::new())));
-        assert!(a.dialog.is_none());
+        assert!(a.config_dialog().is_none());
         let _ = Choice {
             value: String::new(),
             label: String::new(),
@@ -1463,9 +1520,12 @@ mod tests {
         let mut a = app(&t, Some(jira_settings()));
         assert!(a.take_fetch_requests().is_empty());
         assert!(matches!(a.board, BoardState::Unavailable));
-        assert!(a.dialog.is_some(), "missing credentials open the dialog");
+        assert!(
+            a.config_dialog().is_some(),
+            "missing credentials open the dialog"
+        );
         key(&mut a, KeyCode::Esc);
-        assert!(a.dialog.is_none());
+        assert!(a.config_dialog().is_none());
         let rows = render_rows(60, 6, |f| a.render(f));
         assert!(
             !rows
@@ -1478,7 +1538,7 @@ mod tests {
         let mut a = app(&t, Some(without));
         assert!(a.take_fetch_requests().is_empty());
         assert!(matches!(a.board, BoardState::Unavailable));
-        assert!(a.dialog.is_some());
+        assert!(a.config_dialog().is_some());
     }
 
     #[test]
@@ -1571,7 +1631,7 @@ mod tests {
         a.take_fetch_requests();
         a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('r'));
         assert!(a.take_fetch_requests().is_empty());
-        assert!(a.pull.is_some());
+        assert!(a.pull_dialog().is_some());
         a.handle_message(Message::PullRequest(Ok(crate::github::pull::PullDetails {
             number: 5,
             head_oid: "0123abcd".into(),
@@ -1591,7 +1651,7 @@ mod tests {
             }],
             "{requests:?}"
         );
-        assert!(a.pull.is_some());
+        assert!(a.pull_dialog().is_some());
     }
 
     #[test]
@@ -1600,7 +1660,7 @@ mod tests {
         let t = TempDir::new("boardconfirm");
         let mut a = app(&t, None);
         assert!(a.take_fetch_requests().is_empty());
-        let d = a.dialog.as_mut().expect("dialog");
+        let d = a.config_mut().expect("dialog");
         for (f, v) in [
             (Field::Owner, "o"),
             (Field::Repo, "r"),
@@ -1610,7 +1670,7 @@ mod tests {
             d.set_value(f, v);
         }
         key(&mut a, KeyCode::Enter);
-        assert!(a.dialog.is_none());
+        assert!(a.config_dialog().is_none());
         assert_eq!(
             a.take_fetch_requests(),
             vec![
@@ -1636,7 +1696,7 @@ mod tests {
         a.take_fetch_requests();
         key(&mut a, KeyCode::Enter);
         assert!(
-            a.take_fetch_requests().is_empty() && a.issue.is_none(),
+            a.take_fetch_requests().is_empty() && a.issue_dialog().is_none(),
             "no card yet"
         );
         a.handle_message(Message::Board(Ok(loaded_board())));
@@ -1658,11 +1718,11 @@ mod tests {
         key(&mut a, KeyCode::Char(':'));
         assert!(!a.command_line.is_open(), "overlay takes the key");
         key(&mut a, KeyCode::Esc);
-        assert!(a.issue.is_none());
+        assert!(a.issue_dialog().is_none());
         a.handle_message(Message::Issue(Err(
             crate::github::GithubError::MissingIssue,
         )));
-        assert!(a.issue.is_none(), "late result discarded");
+        assert!(a.issue_dialog().is_none(), "late result discarded");
         assert!(!a.quit);
     }
 
@@ -1813,7 +1873,7 @@ mod tests {
         key(&mut a, KeyCode::Char('j'));
         assert_eq!(a.take_fetch_requests(), vec![blob("b.rs")]);
         key(&mut a, KeyCode::Esc);
-        assert!(a.pull.is_none());
+        assert!(a.pull_dialog().is_none());
         a.handle_message(Message::Blob {
             oid: "0123abcd".into(),
             path: "b.rs".into(),
@@ -1852,7 +1912,7 @@ mod tests {
         }
         key(&mut a, KeyCode::Enter);
         assert_eq!(a.active_tab, Tab::Board);
-        assert!(a.pull.is_none() && a.issue.is_some());
+        assert!(a.pull_dialog().is_none() && a.issue_dialog().is_some());
         assert_eq!(
             a.take_fetch_requests(),
             vec![FetchRequest::Issue {
@@ -1876,7 +1936,7 @@ mod tests {
         }
         key(&mut a, KeyCode::Enter);
         assert_eq!(a.active_tab, Tab::Remote);
-        assert!(a.issue.is_none() && a.pull.is_some());
+        assert!(a.issue_dialog().is_none() && a.pull_dialog().is_some());
         assert_eq!(
             a.take_fetch_requests(),
             vec![FetchRequest::PullRequest {
@@ -1900,7 +1960,7 @@ mod tests {
         key(&mut a, KeyCode::Char('1'));
         key(&mut a, KeyCode::Enter);
         assert!(
-            a.take_fetch_requests().is_empty() && a.pull.is_none(),
+            a.take_fetch_requests().is_empty() && a.pull_dialog().is_none(),
             "no row yet"
         );
         a.handle_message(Message::PullRequests(Ok(vec![
@@ -1929,10 +1989,10 @@ mod tests {
         key(&mut a, KeyCode::Char(':'));
         assert!(!a.command_line.is_open(), "overlay takes the key");
         key(&mut a, KeyCode::Esc);
-        assert!(a.pull.is_none());
+        assert!(a.pull_dialog().is_none());
         a.handle_message(Message::PullRequest(Err(
             crate::github::GithubError::MissingPullRequest,
         )));
-        assert!(a.pull.is_none(), "late result discarded");
+        assert!(a.pull_dialog().is_none(), "late result discarded");
     }
 }
