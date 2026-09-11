@@ -9,7 +9,11 @@ use super::pull::ReviewState;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Comment {
+        /// The handle `updateIssueComment` takes (GH-R-026).
+        id: String,
         body: String,
+        /// The viewer's `viewerCanUpdate` (GH-R-025).
+        editable: bool,
     },
     Assigned {
         login: String,
@@ -80,7 +84,7 @@ const ISSUE_ITEM_TYPES: &str = "[ISSUE_COMMENT, ASSIGNED_EVENT, UNASSIGNED_EVENT
 const PULL_ITEM_TYPES: &str = "[ISSUE_COMMENT, ASSIGNED_EVENT, UNASSIGNED_EVENT, LABELED_EVENT, UNLABELED_EVENT, MILESTONED_EVENT, DEMILESTONED_EVENT, CLOSED_EVENT, REOPENED_EVENT, RENAMED_TITLE_EVENT, MERGED_EVENT, REVIEW_REQUESTED_EVENT, PULL_REQUEST_REVIEW, REFERENCED_EVENT, CROSS_REFERENCED_EVENT]";
 
 /// Node fragments common to issues and pull requests.
-const COMMON_FRAGMENTS: &str = "... on IssueComment { author { login } createdAt body } ... on AssignedEvent { actor { login } createdAt assignee { __typename ... on User { login } } } ... on UnassignedEvent { actor { login } createdAt assignee { __typename ... on User { login } } } ... on LabeledEvent { actor { login } createdAt label { name color } } ... on UnlabeledEvent { actor { login } createdAt label { name color } } ... on MilestonedEvent { actor { login } createdAt milestoneTitle } ... on DemilestonedEvent { actor { login } createdAt milestoneTitle } ... on ClosedEvent { actor { login } createdAt stateReason } ... on ReopenedEvent { actor { login } createdAt } ... on RenamedTitleEvent { actor { login } createdAt previousTitle currentTitle } ... on ReferencedEvent { actor { login } createdAt commit { abbreviatedOid messageHeadline } } ... on CrossReferencedEvent { actor { login } createdAt source { __typename ... on Issue { number title repository { nameWithOwner } } ... on PullRequest { number title repository { nameWithOwner } } } }";
+const COMMON_FRAGMENTS: &str = "... on IssueComment { id author { login } createdAt body viewerCanUpdate } ... on AssignedEvent { actor { login } createdAt assignee { __typename ... on User { login } } } ... on UnassignedEvent { actor { login } createdAt assignee { __typename ... on User { login } } } ... on LabeledEvent { actor { login } createdAt label { name color } } ... on UnlabeledEvent { actor { login } createdAt label { name color } } ... on MilestonedEvent { actor { login } createdAt milestoneTitle } ... on DemilestonedEvent { actor { login } createdAt milestoneTitle } ... on ClosedEvent { actor { login } createdAt stateReason } ... on ReopenedEvent { actor { login } createdAt } ... on RenamedTitleEvent { actor { login } createdAt previousTitle currentTitle } ... on ReferencedEvent { actor { login } createdAt commit { abbreviatedOid messageHeadline } } ... on CrossReferencedEvent { actor { login } createdAt source { __typename ... on Issue { number title repository { nameWithOwner } } ... on PullRequest { number title repository { nameWithOwner } } } }";
 
 /// Node fragments that only exist on a pull request timeline.
 const PULL_FRAGMENTS: &str = "... on MergedEvent { actor { login } createdAt } ... on ReviewRequestedEvent { actor { login } createdAt requestedReviewer { __typename ... on User { login } ... on Team { name } } } ... on PullRequestReview { author { login } createdAt state body }";
@@ -201,9 +205,11 @@ enum Source {
 #[serde(tag = "__typename", rename_all_fields = "camelCase")]
 enum Node {
     IssueComment {
+        id: String,
         author: Option<Login>,
         created_at: String,
         body: String,
+        viewer_can_update: bool,
     },
     AssignedEvent {
         actor: Option<Login>,
@@ -296,10 +302,20 @@ impl Node {
         };
         Some(match self {
             Node::IssueComment {
+                id,
                 author,
                 created_at,
                 body,
-            } => item(author, created_at, Event::Comment { body }),
+                viewer_can_update,
+            } => item(
+                author,
+                created_at,
+                Event::Comment {
+                    id,
+                    body,
+                    editable: viewer_can_update,
+                },
+            ),
             Node::AssignedEvent {
                 actor,
                 created_at,
@@ -445,7 +461,8 @@ mod tests {
     use super::*;
 
     const NODES: &str = r#"{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[
-        {"__typename":"IssueComment","author":{"login":"a"},"createdAt":"2026-09-01T00:00:00Z","body":"LGTM"},
+        {"__typename":"IssueComment","author":{"login":"a"},"createdAt":"2026-09-01T00:00:00Z","body":"LGTM","id":"IC_1","viewerCanUpdate":true},
+        {"__typename":"IssueComment","author":{"login":"a"},"createdAt":"2026-09-01T00:00:01Z","body":"locked","id":"IC_2","viewerCanUpdate":false},
         {"__typename":"AssignedEvent","actor":{"login":"octo"},"createdAt":"2026-09-02T00:00:00Z","assignee":{"__typename":"User","login":"b"}},
         {"__typename":"UnassignedEvent","actor":null,"createdAt":"2026-09-02T00:00:01Z","assignee":{"__typename":"User","login":"b"}},
         {"__typename":"AssignedEvent","actor":{"login":"octo"},"createdAt":"2026-09-02T00:00:02Z","assignee":{"__typename":"Bot"}},
@@ -482,7 +499,14 @@ mod tests {
             events,
             vec![
                 &Event::Comment {
-                    body: "LGTM".into()
+                    id: "IC_1".into(),
+                    body: "LGTM".into(),
+                    editable: true,
+                },
+                &Event::Comment {
+                    id: "IC_2".into(),
+                    body: "locked".into(),
+                    editable: false,
                 },
                 &Event::Assigned { login: "b".into() },
                 &Event::Unassigned { login: "b".into() },
@@ -524,9 +548,9 @@ mod tests {
             "a comment's author is its actor"
         );
         assert_eq!(items[0].created_at, "2026-09-01T00:00:00Z");
-        assert_eq!(items[2].actor, None);
+        assert_eq!(items[3].actor, None);
         assert_eq!(
-            items[13].actor.as_deref(),
+            items[14].actor.as_deref(),
             Some("rev"),
             "a review's author is its actor"
         );
@@ -537,8 +561,8 @@ mod tests {
     }
 
     #[test]
-    /// GH-R-010, GH-R-015, GH-E-009 — the selection carries the type filter and every node
-    /// fragment; the issue selection spreads no pull-only fragment.
+    /// GH-R-010, GH-R-015, GH-R-017, GH-E-009 — the selection carries the type filter and every node
+    /// fragment, the comment fragment's `id … viewerCanUpdate` included; the issue selection spreads no pull-only fragment.
     fn ut_selection_text() {
         let pull = selection(Owner::Pull);
         assert!(
@@ -570,7 +594,7 @@ mod tests {
             "{issue}"
         );
         for fragment in [
-            "... on IssueComment { author { login } createdAt body }",
+            "... on IssueComment { id author { login } createdAt body viewerCanUpdate }",
             "... on ClosedEvent { actor { login } createdAt stateReason }",
             "... on RenamedTitleEvent { actor { login } createdAt previousTitle currentTitle }",
             "... on ReferencedEvent { actor { login } createdAt commit { abbreviatedOid messageHeadline } }",

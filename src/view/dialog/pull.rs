@@ -86,6 +86,7 @@ pub fn content(details: PullDetails) -> DetailsContent {
         state,
         author: details.author,
         body: details.body,
+        body_editable: details.body_editable,
         timeline: details.timeline,
         boxes: vec![
             SidebarBox {

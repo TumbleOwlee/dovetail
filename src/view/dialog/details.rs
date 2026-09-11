@@ -188,6 +188,8 @@ pub struct DetailsContent {
     /// `None` when the author account was deleted.
     pub author: Option<String>,
     pub body: String,
+    /// The viewer may update the subject's body (GH-R-025).
+    pub body_editable: bool,
     pub timeline: Vec<TimelineItem>,
     pub boxes: Vec<SidebarBox>,
 }
@@ -1236,7 +1238,7 @@ fn timeline_card(item: &TimelineItem) -> CardText {
     let dim = theme::on_bg(theme::TEMPLATE.placeholder);
     let mut markdown = String::new();
     let (margin, lines): (Margin, Vec<Line<'static>>) = match &item.event {
-        Event::Comment { body } => {
+        Event::Comment { body, .. } => {
             markdown = body.clone();
             (CARD_MARGIN, vec![])
         }
@@ -1366,6 +1368,7 @@ mod tests {
             state: "open",
             author: Some("octo".into()),
             body: body.into(),
+            body_editable: true,
             timeline,
             boxes: vec![
                 SidebarBox {
@@ -1396,7 +1399,14 @@ mod tests {
     }
 
     fn comment(actor: Option<&str>, body: &str) -> TimelineItem {
-        item(actor, Event::Comment { body: body.into() })
+        item(
+            actor,
+            Event::Comment {
+                id: "IC_1".into(),
+                body: body.into(),
+                editable: true,
+            },
+        )
     }
 
     /// Columns of the bar for an 80 column screen: inset 1, border 1, margin 1 on each side.
@@ -2084,13 +2094,8 @@ mod tests {
     fn ut_markdown_bodies() {
         let mut d = DetailsDialog::new(5, "T".into(), "L");
         let timeline = vec![
-            item(
-                Some("a"),
-                Event::Comment {
-                    body: "> quoted\n- [x] done".into(),
-                },
-            ),
-            item(Some("b"), Event::Comment { body: "".into() }),
+            comment(Some("a"), "> quoted\n- [x] done"),
+            comment(Some("b"), ""),
             item(
                 Some("c"),
                 Event::Reviewed {

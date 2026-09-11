@@ -34,6 +34,7 @@ pub fn content(issue: Issue) -> DetailsContent {
         state,
         author: issue.author,
         body: issue.body,
+        body_editable: issue.body_editable,
         timeline: issue.timeline,
         boxes: vec![
             SidebarBox {
@@ -94,6 +95,7 @@ mod tests {
             title: "Crash on start".into(),
             state: IssueState::Closed,
             body: "Steps".into(),
+            body_editable: true,
             url: "u".into(),
             author: None,
             repository: "o/r".into(),
@@ -115,7 +117,9 @@ mod tests {
                 actor: Some("a".into()),
                 created_at: "2026-09-04T10:00:00Z".into(),
                 event: Event::Comment {
+                    id: "IC_1".into(),
                     body: "LGTM".into(),
+                    editable: true,
                 },
             }],
         };
@@ -124,6 +128,7 @@ mod tests {
             (c.state, c.author, c.title.as_str()),
             ("closed", None, "Crash on start")
         );
+        assert!(c.body_editable);
         assert_eq!(c.timeline.len(), 1);
         let titles: Vec<&str> = c.boxes.iter().map(|b| b.title).collect();
         assert_eq!(

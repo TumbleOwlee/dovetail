@@ -8,7 +8,7 @@ use super::timeline::{self, TimelineItem};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
-const QUERY_HEAD: &str = "query($id: ID!, $after: String) { node(id: $id) { __typename ... on Issue { title number state body url author { login } repository { nameWithOwner } labels(first: 10) { nodes { name color } } assignees(first: 5) { nodes { login } } projectItems(first: 10) { nodes { project { title } } } milestone { title } parent { number title } subIssues(first: 20) { nodes { number title } } closedByPullRequestsReferences(first: 10) { nodes { number title repository { nameWithOwner } } } participants(first: 20) { nodes { login } }";
+const QUERY_HEAD: &str = "query($id: ID!, $after: String) { node(id: $id) { __typename ... on Issue { title number state body viewerCanUpdate url author { login } repository { nameWithOwner } labels(first: 10) { nodes { name color } } assignees(first: 5) { nodes { login } } projectItems(first: 10) { nodes { project { title } } } milestone { title } parent { number title } subIssues(first: 20) { nodes { number title } } closedByPullRequestsReferences(first: 10) { nodes { number title repository { nameWithOwner } } } participants(first: 20) { nodes { login } }";
 
 const QUERY_TAIL: &str = " } } }";
 
@@ -29,6 +29,8 @@ pub struct Issue {
     pub title: String,
     pub state: IssueState,
     pub body: String,
+    /// The viewer may update the body (GH-R-025).
+    pub body_editable: bool,
     pub url: String,
     /// `None` when the author account was deleted.
     pub author: Option<String>,
@@ -121,6 +123,7 @@ struct IssueNode {
     number: u64,
     state: IssueState,
     body: String,
+    viewer_can_update: bool,
     url: String,
     author: Option<Author>,
     repository: Repository,
@@ -202,6 +205,7 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
             title: node.title,
             state: node.state,
             body: node.body,
+            body_editable: node.viewer_can_update,
             url: node.url,
             author: node.author.map(|a| a.login),
             repository: node.repository.name_with_owner,
@@ -289,14 +293,14 @@ pub async fn load_issue(
 mod tests {
     use super::*;
 
-    const BODY: &str = r#"{"data":{"node":{"__typename":"Issue","title":"Crash on start","number":7,"state":"OPEN","body":"Steps:\n1. run\n2. boom","url":"https://github.com/o/r/issues/7","author":{"login":"octo"},"repository":{"nameWithOwner":"o/r"},"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},"assignees":{"nodes":[{"login":"a"}]},
+    const BODY: &str = r#"{"data":{"node":{"__typename":"Issue","title":"Crash on start","number":7,"state":"OPEN","body":"Steps:\n1. run\n2. boom","url":"https://github.com/o/r/issues/7","author":{"login":"octo"},"repository":{"nameWithOwner":"o/r"},"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},"assignees":{"nodes":[{"login":"a"}]},"viewerCanUpdate":true,
         "projectItems":{"nodes":[{"project":{"title":"Roadmap"}}]},"milestone":{"title":"v1"},
         "parent":{"number":3,"title":"Epic"},"subIssues":{"nodes":[{"number":8,"title":"Child"}]},
         "closedByPullRequestsReferences":{"nodes":[{"number":5,"title":"Fix crash","repository":{"nameWithOwner":"o/r"}}]},"participants":{"nodes":[{"login":"octo"},{"login":"a"}]},
-        "timelineItems":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[{"__typename":"IssueComment","body":"LGTM","createdAt":"2026-09-04T10:00:00Z","author":{"login":"a"}},{"__typename":"ClosedEvent","actor":{"login":"octo"},"createdAt":"2026-09-05T10:00:00Z","stateReason":"COMPLETED"}]}}}}"#;
+        "timelineItems":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[{"__typename":"IssueComment","body":"LGTM","createdAt":"2026-09-04T10:00:00Z","author":{"login":"a"},"id":"IC_1","viewerCanUpdate":true},{"__typename":"ClosedEvent","actor":{"login":"octo"},"createdAt":"2026-09-05T10:00:00Z","stateReason":"COMPLETED"}]}}}}"#;
 
     #[test]
-    /// GH-R-010 — the query asks for the node by id with every detail field.
+    /// GH-R-010, GH-R-025 — the query asks for the node by id with every detail field, `viewerCanUpdate` on the Issue selection included.
     fn ut_request_body_shape() {
         let body: serde_json::Value =
             serde_json::from_str(&request_body("I_1", Some("abc"))).expect("json");
@@ -322,6 +326,7 @@ mod tests {
             "subIssues(first: 20) { nodes { number title } }",
             "closedByPullRequestsReferences(first: 10) { nodes { number title repository { nameWithOwner } } }",
             "participants(first: 20) { nodes { login } }",
+            "state body viewerCanUpdate url",
             "timelineItems(first: 100, after: $after, itemTypes: [ISSUE_COMMENT, ",
             "... on ClosedEvent { actor { login } createdAt stateReason }",
         ] {
@@ -330,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    /// GH-R-010 — every detail field is carried; a deleted author is `None`.
+    /// GH-R-010, GH-R-025 — every detail field is carried, `body_editable` included; a deleted author is `None`.
     fn ut_parse_issue_details() {
         let issue = parse_issue(BODY).expect("parses");
         assert_eq!(issue.number, 7);
@@ -342,6 +347,7 @@ mod tests {
         assert_eq!(issue.repository, "o/r");
         assert_eq!(issue.labels[0].name, "bug");
         assert_eq!(issue.assignees, vec!["a".to_string()]);
+        assert!(issue.body_editable);
         let ghost = BODY.replace(r#""author":{"login":"octo"}"#, r#""author":null"#);
         let issue = parse_issue(&ghost).expect("parses");
         assert_eq!(issue.author, None);
@@ -381,7 +387,9 @@ mod tests {
         assert_eq!(
             issue.timeline[0].event,
             timeline::Event::Comment {
-                body: "LGTM".into()
+                id: "IC_1".into(),
+                body: "LGTM".into(),
+                editable: true,
             }
         );
         assert_eq!(
