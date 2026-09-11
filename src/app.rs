@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
+use ratatui::widgets::StatefulWidget;
 
 use crate::command::{self, Cmd};
 use crate::config::profile::{profile_base, store_profile};
@@ -14,7 +15,7 @@ use crate::config::{
 use crate::event::Message;
 use crate::github::review::ReviewAction;
 use crate::view::board::{self, BoardView};
-use crate::view::command_line::{CommandLine, CommandLineEvent};
+use crate::view::command_line;
 use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteForm};
 use crate::view::dialog::config::{Choice, Field};
 use crate::view::dialog::details::{
@@ -25,6 +26,7 @@ use crate::view::notice;
 use crate::view::remote::RemoteView;
 use crate::view::tabs::{self, Tab};
 use crate::view::theme;
+use ferrowl_ui::state::{CommandLineOutcome, CommandLineState};
 
 /// A fetch the loop runs on the app's behalf, keyed by the credentials it needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,7 +114,7 @@ pub struct App {
     pub issue: Option<DetailsDialog>,
     /// The pull request details overlay while open.
     pub pull: Option<DetailsDialog>,
-    pub command_line: CommandLine,
+    pub command_line: CommandLineState,
     pub board: BoardState,
     pub remote: RemoteState,
     pending_fetches: Vec<FetchRequest>,
@@ -145,7 +147,7 @@ impl App {
             dialog,
             issue: None,
             pull: None,
-            command_line: CommandLine::new(),
+            command_line: command_line::state(),
             board: BoardState::Unavailable,
             remote: RemoteState::Unavailable,
             pending_fetches: Vec::new(),
@@ -479,7 +481,7 @@ impl App {
         let Some(mut dialog) = self.waiting_dialog.take() else {
             return;
         };
-        self.command_line.clear_notice();
+        self.command_line.set_notice(None);
         let outcome = match message {
             Message::GithubProjects(Ok(projects)) => Ok((
                 Field::BoardProject,
@@ -519,7 +521,9 @@ impl App {
                 dialog.set_options(field, choices);
                 self.dialog = Some(dialog);
             }
-            Err(message) => self.command_line.set_error(message),
+            Err(message) => {
+                self.command_line.set_error(Some(message));
+            }
         }
     }
 
@@ -536,7 +540,7 @@ impl App {
 
     /// Dialog first, then the command line, then the main view.
     pub fn handle_key(&mut self, modifiers: KeyModifiers, code: KeyCode) {
-        self.command_line.clear_error();
+        self.command_line.set_error(None);
         if modifiers == KeyModifiers::CONTROL && code == KeyCode::Char('r') {
             match self.pull.as_ref().or(self.issue.as_ref()) {
                 Some(overlay) => match overlay.refetch() {
@@ -596,9 +600,10 @@ impl App {
             return;
         }
         if self.command_line.is_open() {
-            match self.command_line.handle_key(modifiers, code) {
-                CommandLineEvent::Consumed | CommandLineEvent::Cancel => {}
-                CommandLineEvent::Submit(text) => self.execute(command::parse(&text)),
+            if let Some(CommandLineOutcome::Submit(text)) =
+                self.command_line.handle_key(modifiers, code)
+            {
+                self.execute(command::parse(&text));
             }
             return;
         }
@@ -665,7 +670,7 @@ impl App {
                 RemoteState::Unavailable => buf.set_style(middle, theme::base()),
             },
         }
-        self.command_line.render(bottom, buf);
+        StatefulWidget::render(&command_line::widget(), bottom, buf, &mut self.command_line);
         if let Some(issue) = self.issue.as_mut() {
             issue.render(middle, buf);
         }
@@ -675,7 +680,6 @@ impl App {
         if let Some(dialog) = self.dialog.as_mut() {
             dialog.render(area, buf);
         }
-        self.command_line.render_overlay(area, buf);
     }
 
     fn execute(&mut self, cmd: Cmd) {
@@ -690,23 +694,26 @@ impl App {
                 let board = self.request_board();
                 let remote = self.request_remote();
                 if !board && !remote {
-                    self.command_line.set_error("not configured".to_string());
+                    self.command_line
+                        .set_error(Some("not configured".to_string()));
                 }
             }
-            Cmd::Unknown(text) => self
-                .command_line
-                .set_error(format!("unknown command: {text}")),
+            Cmd::Unknown(text) => {
+                self.command_line
+                    .set_error(Some(format!("unknown command: {text}")));
+            }
         }
     }
 
     /// Runs a write when configured; any failure lands in the command line.
     fn report(&mut self, configured: bool, write: fn(&mut App) -> Result<(), ConfigError>) {
         if !configured {
-            self.command_line.set_error("not configured".to_string());
+            self.command_line
+                .set_error(Some("not configured".to_string()));
             return;
         }
         if let Err(e) = write(self) {
-            self.command_line.set_error(e.to_string());
+            self.command_line.set_error(Some(e.to_string()));
         }
     }
 
@@ -747,7 +754,7 @@ impl App {
                 self.pending_fetches.push(request);
                 self.waiting_dialog = Some(dialog);
                 self.command_line
-                    .set_notice("loading projects…".to_string());
+                    .set_notice(Some("loading projects…".to_string()));
             }
             None => self.dialog = Some(dialog),
         }
@@ -981,9 +988,12 @@ mod tests {
         let t = TempDir::new("unknown");
         let mut a = app(&t, Some(settings()));
         command(&mut a, "frob");
-        assert_eq!(a.command_line.error(), Some("unknown command: frob"));
+        assert_eq!(
+            a.command_line.error().as_deref(),
+            Some("unknown command: frob")
+        );
         key(&mut a, KeyCode::Char('1'));
-        assert_eq!(a.command_line.error(), None);
+        assert_eq!(a.command_line.error().as_deref(), None);
     }
 
     #[test]
@@ -1019,7 +1029,7 @@ mod tests {
         key(&mut a, KeyCode::Char(':'));
         key(&mut a, KeyCode::Char('2'));
         assert_eq!(a.active_tab, Tab::Board);
-        assert_eq!(a.command_line.input(), "2");
+        assert_eq!(a.command_line.input().input(), "2");
     }
 
     #[test]
@@ -1118,7 +1128,7 @@ mod tests {
         let t = TempDir::new("w");
         let mut a = app(&t, Some(settings()));
         command(&mut a, "w");
-        assert_eq!(a.command_line.error(), None);
+        assert_eq!(a.command_line.error().as_deref(), None);
         let on_disk = store::load_user_config(&a.user_path).expect("loads");
         assert_eq!(on_disk.repo.len(), 1);
         assert_eq!(on_disk.repo[0].board, settings().board);
@@ -1133,7 +1143,7 @@ mod tests {
         a.dialog = None;
         a.settings = None;
         command(&mut a, "w");
-        assert_eq!(a.command_line.error(), Some("not configured"));
+        assert_eq!(a.command_line.error().as_deref(), Some("not configured"));
     }
 
     #[test]
@@ -1341,9 +1351,9 @@ mod tests {
             crate::atlassian::AtlassianError::Status(401),
         )));
         assert!(a.dialog.is_none());
-        assert_eq!(a.command_line.error(), Some("jira: HTTP 401"));
+        assert_eq!(a.command_line.error().as_deref(), Some("jira: HTTP 401"));
         key(&mut a, KeyCode::Char('x'));
-        assert_eq!(a.command_line.error(), None);
+        assert_eq!(a.command_line.error().as_deref(), None);
     }
 
     #[test]
@@ -1501,7 +1511,7 @@ mod tests {
         let mut a = app(&t, Some(jira_settings()));
         key(&mut a, KeyCode::Esc);
         command(&mut a, "reload");
-        assert_eq!(a.command_line.error(), Some("not configured"));
+        assert_eq!(a.command_line.error().as_deref(), Some("not configured"));
     }
 
     #[test]
@@ -1519,7 +1529,7 @@ mod tests {
         a.take_fetch_requests();
         a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('r'));
         assert!(a.take_fetch_requests().is_empty());
-        assert_eq!(a.command_line.error(), Some("not configured"));
+        assert_eq!(a.command_line.error().as_deref(), Some("not configured"));
     }
 
     #[test]

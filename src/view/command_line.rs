@@ -1,297 +1,152 @@
-//! The `:` prompt on the bottom line, the help box above it while open, and the hint bar,
-//! error or notice shown there while closed.
+//! The main view's `:` command line, built on ferrowl-ui's `CommandLine` widget:
+//! the prompt and help box while open, else the error, notice or hint bar.
 
-use crossterm::event::{KeyCode, KeyModifiers};
-use ferrowl_ui::state::{InputFieldState, InputFieldStateBuilder};
+use ferrowl_ui::state::{CommandLineState, CommandLineStateBuilder, InputFieldStateBuilder};
 use ferrowl_ui::style::InputFieldStyle;
-use ferrowl_ui::traits::{HandleEvents, SetFocus};
-use ferrowl_ui::widgets::{InputField, InputFieldBuilder, Widget};
-use ferrowl_ui::{Border, EventResult};
-use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Margin, Rect};
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, StatefulWidget, Widget as RenderWidget};
+use ferrowl_ui::widgets::{CommandLine, CommandLineBuilder};
 
 use crate::command::HELP;
 use crate::view::theme;
 
-type Input = Widget<InputFieldState, InputField<String>>;
-
 const HINT: &str = ":  command  |  C-t+j C-t+k  tabs";
-const HELP_WIDTH: u16 = 62;
-const USAGE_COLUMN: usize = 12;
 
-/// What a key did to the command line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommandLineEvent {
-    Consumed,
-    /// Enter: the raw input, to be parsed by the caller. The line is closed.
-    Submit(String),
-    /// Esc: closed without executing.
-    Cancel,
+/// The state with the hint bar set, closed and empty.
+pub fn state() -> CommandLineState {
+    CommandLineStateBuilder::default()
+        .hint(HINT.to_string())
+        // An empty placeholder keeps the widget's "Enter value.." hint off the line.
+        .input(
+            InputFieldStateBuilder::default()
+                .placeholder(Some(String::new()))
+                .build()
+                .expect("InputFieldStateBuilder fields all default"),
+        )
+        .build()
+        .expect("CommandLineStateBuilder fields all default")
 }
 
-pub struct CommandLine {
-    input: Input,
-    open: bool,
-    /// Shown until the next key press.
-    error: Option<String>,
-    /// Shown until explicitly cleared; outranked by an error.
-    notice: Option<String>,
-}
-
-impl Default for CommandLine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CommandLine {
-    pub fn new() -> CommandLine {
-        let base = Style::default().fg(theme::TEMPLATE.text).bg(theme::BG);
-        let state = InputFieldStateBuilder::default()
-            .focused(false)
-            // An empty placeholder keeps the widget's "Enter value.." hint off the line.
-            .placeholder(Some(String::new()))
-            .build()
-            .expect("InputFieldStateBuilder fields all default");
-        let widget = InputFieldBuilder::default()
-            .border(Border::None)
-            .margin(Margin::new(0, 0))
-            .style(InputFieldStyle {
-                general: base,
-                focused: base,
-                ..theme::input_field_style()
-            })
-            .build()
-            .expect("InputFieldBuilder fields all default");
-        CommandLine {
-            input: Widget { state, widget },
-            open: false,
-            error: None,
-            notice: None,
-        }
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.open
-    }
-
-    /// Clears the input and takes focus.
-    pub fn open(&mut self) {
-        self.input.state.set_input(String::new());
-        self.input.state.set_cursor(0);
-        SetFocus::set_focused(&mut self.input, true);
-        self.open = true;
-    }
-
-    fn close(&mut self) {
-        SetFocus::set_focused(&mut self.input, false);
-        self.open = false;
-    }
-
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-
-    pub fn set_error(&mut self, message: String) {
-        self.error = Some(message);
-    }
-
-    pub fn clear_error(&mut self) {
-        self.error = None;
-    }
-
-    pub fn set_notice(&mut self, message: String) {
-        self.notice = Some(message);
-    }
-
-    pub fn clear_notice(&mut self) {
-        self.notice = None;
-    }
-
-    #[cfg(test)]
-    pub fn input(&self) -> &str {
-        self.input.state.input()
-    }
-
-    /// Only meaningful while open.
-    pub fn handle_key(&mut self, modifiers: KeyModifiers, code: KeyCode) -> CommandLineEvent {
-        match self.input.handle_events(modifiers, code) {
-            EventResult::Consumed => CommandLineEvent::Consumed,
-            EventResult::Unhandled(_, KeyCode::Enter) => {
-                let text = self.input.state.input().clone();
-                self.close();
-                CommandLineEvent::Submit(text)
-            }
-            EventResult::Unhandled(_, KeyCode::Esc) => {
-                self.close();
-                CommandLineEvent::Cancel
-            }
-            EventResult::Unhandled(..) => CommandLineEvent::Consumed,
-        }
-    }
-
-    /// The bottom line: the prompt while open; else the error, the notice, or the hint bar.
-    pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
-        let base = Style::default().fg(theme::TEMPLATE.text).bg(theme::BG);
-        buf.set_style(area, base);
-        if self.open {
-            let [prompt, rest] =
-                Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
-            Paragraph::new(":")
-                .style(Style::default().fg(theme::TEMPLATE.hi).bg(theme::BG))
-                .render(prompt, buf);
-            StatefulWidget::render(&self.input.widget, rest, buf, &mut self.input.state);
-        } else if let Some(error) = self.error() {
-            Paragraph::new(error)
-                .style(Style::default().fg(theme::TEMPLATE.error).bg(theme::BG))
-                .render(area, buf);
-        } else if let Some(notice) = &self.notice {
-            Paragraph::new(notice.as_str())
-                .style(base)
-                .render(area, buf);
-        } else {
-            Paragraph::new(HINT).style(base).render(area, buf);
-        }
-    }
-
-    /// The help box, anchored above the prompt; call after every other widget of the frame.
-    /// `bounds` is the whole frame: the prompt is assumed to be its bottom line.
-    pub fn render_overlay(&mut self, bounds: Rect, buf: &mut Buffer) {
-        if !self.open || bounds.height < 3 {
-            return;
-        }
-        let usage_style = Style::default().fg(theme::TEMPLATE.hi).bg(theme::BG).bold();
-        let desc_style = Style::default().fg(theme::TEMPLATE.text).bg(theme::BG);
-        let lines: Vec<Line> = HELP
-            .iter()
-            .map(|(usage, desc)| {
-                Line::from(vec![
-                    Span::styled(format!("{usage:<USAGE_COLUMN$}"), usage_style),
-                    Span::styled(*desc, desc_style),
-                ])
-            })
-            .collect();
-        let height = (lines.len() as u16 + 2).min(bounds.height - 1);
-        let popup = Rect {
-            x: bounds.x,
-            y: bounds.y + bounds.height - 1 - height,
-            width: HELP_WIDTH.min(bounds.width),
-            height,
-        };
-        Clear.render(popup, buf);
-        let block = Block::bordered().style(Style::default().fg(theme::TEMPLATE.hi).bg(theme::BG));
-        let inner = block.inner(popup);
-        block.render(popup, buf);
-        Paragraph::new(lines)
-            .style(Style::default().bg(theme::BG))
-            .render(inner, buf);
-    }
+/// The widget, styled on the background, listing every command in its help box.
+pub fn widget() -> CommandLine {
+    CommandLineBuilder::default()
+        .style(InputFieldStyle {
+            general: theme::base(),
+            focused: theme::base(),
+            ..theme::input_field_style()
+        })
+        .highlight_style(theme::on_bg(theme::TEMPLATE.hi))
+        .error_style(theme::on_bg(theme::TEMPLATE.error))
+        .help(
+            HELP.iter()
+                .map(|(usage, desc)| (usage.to_string(), desc.to_string()))
+                .collect::<Vec<_>>(),
+        )
+        .build()
+        .expect("CommandLineBuilder fields all default")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use ferrowl_ui::state::CommandLineOutcome;
+    use ratatui::layout::Rect;
+    use ratatui::widgets::StatefulWidget;
 
-    fn type_str(cl: &mut CommandLine, s: &str) {
-        for c in s.chars() {
+    fn type_str(s: &mut CommandLineState, text: &str) {
+        for c in text.chars() {
             assert_eq!(
-                cl.handle_key(KeyModifiers::NONE, KeyCode::Char(c)),
-                CommandLineEvent::Consumed
+                s.handle_key(KeyModifiers::NONE, KeyCode::Char(c)),
+                Some(CommandLineOutcome::Consumed)
             );
         }
+    }
+
+    fn render_bottom(s: &mut CommandLineState, width: u16, height: u16) -> Vec<String> {
+        crate::testkit::render_rows(width, height, |f| {
+            let area = f.area();
+            let bottom = Rect::new(0, area.height - 1, area.width, 1);
+            StatefulWidget::render(&widget(), bottom, f.buffer_mut(), s);
+        })
     }
 
     #[test]
     /// TU-R-025 — opening yields an empty, open line.
     fn ut_open_clears_input() {
-        let mut cl = CommandLine::new();
-        assert!(!cl.is_open());
-        cl.open();
-        type_str(&mut cl, "abc");
-        cl.open();
-        assert!(cl.is_open());
-        assert_eq!(cl.input(), "");
+        let mut s = state();
+        assert!(!s.is_open());
+        s.open();
+        type_str(&mut s, "abc");
+        s.open();
+        assert!(s.is_open());
+        assert_eq!(s.input().input(), "");
     }
 
     #[test]
-    /// TU-R-027 — Enter submits the raw input and closes the line.
+    /// TU-R-027 — Enter submits the trimmed input and closes the line.
     fn ut_enter_submits_and_closes() {
-        let mut cl = CommandLine::new();
-        cl.open();
-        type_str(&mut cl, "zzz");
+        let mut s = state();
+        s.open();
+        type_str(&mut s, " zzz ");
         assert_eq!(
-            cl.handle_key(KeyModifiers::NONE, KeyCode::Enter),
-            CommandLineEvent::Submit("zzz".into())
+            s.handle_key(KeyModifiers::NONE, KeyCode::Enter),
+            Some(CommandLineOutcome::Submit("zzz".into()))
         );
-        assert!(!cl.is_open());
+        assert!(!s.is_open());
     }
 
     #[test]
     /// TU-R-028 — Esc closes without submitting.
     fn ut_esc_cancels() {
-        let mut cl = CommandLine::new();
-        cl.open();
-        type_str(&mut cl, "q");
+        let mut s = state();
+        s.open();
+        type_str(&mut s, "q");
         assert_eq!(
-            cl.handle_key(KeyModifiers::NONE, KeyCode::Esc),
-            CommandLineEvent::Cancel
+            s.handle_key(KeyModifiers::NONE, KeyCode::Esc),
+            Some(CommandLineOutcome::Cancel)
         );
-        assert!(!cl.is_open());
+        assert!(!s.is_open());
     }
 
     #[test]
     /// TU-R-025, TU-R-034, TU-R-048 — the bottom line shows the prompt while open, else the error, else the hint.
     fn ut_render_prompt_and_error() {
-        let mut cl = CommandLine::new();
-        cl.open();
-        type_str(&mut cl, "wr");
-        let rows = crate::testkit::render_rows(20, 1, |f| cl.render(f.area(), f.buffer_mut()));
+        let mut s = state();
+        s.open();
+        type_str(&mut s, "wr");
+        let rows = render_bottom(&mut s, 20, 1);
         assert_eq!(rows[0], ":wr");
-        cl.handle_key(KeyModifiers::NONE, KeyCode::Esc);
-        cl.set_error("unknown command: x".into());
-        let rows = crate::testkit::render_rows(20, 1, |f| cl.render(f.area(), f.buffer_mut()));
+        s.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        s.set_error(Some("unknown command: x".into()));
+        let rows = render_bottom(&mut s, 20, 1);
         assert_eq!(rows[0], "unknown command: x");
-        cl.clear_error();
-        let rows = crate::testkit::render_rows(60, 1, |f| cl.render(f.area(), f.buffer_mut()));
-        assert_eq!(rows[0].trim(), ":  command  |  C-t+j C-t+k  tabs");
+        s.set_error(None);
+        let rows = render_bottom(&mut s, 60, 1);
+        assert_eq!(rows[0].trim(), HINT.trim());
     }
 
     #[test]
-    /// TU-R-040 — a notice shows while closed and outlives keys until cleared.
+    /// TU-R-040 — a notice shows while closed and outlives an error clear until cleared itself.
     fn ut_notice_shows_until_cleared() {
-        let mut cl = CommandLine::new();
-        cl.set_notice("loading projects…".into());
-        let rows = crate::testkit::render_rows(40, 1, |f| cl.render(f.area(), f.buffer_mut()));
+        let mut s = state();
+        s.set_notice(Some("loading projects…".into()));
+        let rows = render_bottom(&mut s, 40, 1);
         assert_eq!(rows[0], "loading projects…");
-        cl.clear_error();
-        let rows = crate::testkit::render_rows(40, 1, |f| cl.render(f.area(), f.buffer_mut()));
+        s.set_error(None);
+        let rows = render_bottom(&mut s, 40, 1);
         assert_eq!(rows[0], "loading projects…");
-        cl.clear_notice();
-        let rows = crate::testkit::render_rows(60, 1, |f| cl.render(f.area(), f.buffer_mut()));
+        s.set_notice(None);
+        let rows = render_bottom(&mut s, 60, 1);
         assert!(rows[0].contains("command"));
     }
 
     #[test]
     /// TU-R-026 — the help box lists every command above the prompt while open, and only then.
     fn ut_help_box_above_prompt_while_open() {
-        let mut cl = CommandLine::new();
-        let closed = crate::testkit::render_rows(70, 12, |f| {
-            let area = f.area();
-            let bottom = Rect::new(0, area.height - 1, area.width, 1);
-            cl.render(bottom, f.buffer_mut());
-            cl.render_overlay(area, f.buffer_mut());
-        });
+        let mut s = state();
+        let closed = render_bottom(&mut s, 70, 12);
         assert!(!closed.join("\n").contains("quit"));
-        cl.open();
-        let rows = crate::testkit::render_rows(70, 12, |f| {
-            let area = f.area();
-            let bottom = Rect::new(0, area.height - 1, area.width, 1);
-            cl.render(bottom, f.buffer_mut());
-            cl.render_overlay(area, f.buffer_mut());
-        });
+        s.open();
+        let rows = render_bottom(&mut s, 70, 12);
         let joined = rows.join("\n");
         for (usage, desc) in crate::command::HELP {
             assert!(
