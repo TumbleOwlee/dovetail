@@ -10,7 +10,7 @@ pub struct TempDir(PathBuf);
 impl TempDir {
     pub fn new(tag: &str) -> TempDir {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("prodgy-{tag}-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dovetail-{tag}-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir is creatable");
         TempDir(dir)
     }

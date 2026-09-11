@@ -51,8 +51,8 @@ mod tests {
     /// CF-R-031 — the base name is the section name plus the root's file name.
     fn ut_profile_base_uses_root_file_name() {
         assert_eq!(
-            profile_base("board", Path::new("/home/u/git/prodgy")),
-            "board-prodgy"
+            profile_base("board", Path::new("/home/u/git/dovetail")),
+            "board-dovetail"
         );
         assert_eq!(
             profile_base("remote", Path::new("/x/acme-service/")),

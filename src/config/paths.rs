@@ -11,14 +11,14 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// `$XDG_CONFIG_HOME/prodgy/config.toml`, or `$HOME/.config/prodgy/config.toml` when the
+/// `$XDG_CONFIG_HOME/dovetail/config.toml`, or `$HOME/.config/dovetail/config.toml` when the
 /// variable is unset or empty.
 pub fn user_config_path(xdg_config_home: Option<&OsStr>, home: &Path) -> PathBuf {
     let base = match xdg_config_home {
         Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg),
         _ => home.join(".config"),
     };
-    base.join("prodgy").join("config.toml")
+    base.join("dovetail").join("config.toml")
 }
 
 #[cfg(test)]
@@ -61,7 +61,7 @@ mod tests {
     /// CF-R-003 — `XDG_CONFIG_HOME` set and non-empty wins.
     fn ut_user_config_path_prefers_xdg() {
         let p = user_config_path(Some(OsStr::new("/xdg")), Path::new("/home/u"));
-        assert_eq!(p, PathBuf::from("/xdg/prodgy/config.toml"));
+        assert_eq!(p, PathBuf::from("/xdg/dovetail/config.toml"));
     }
 
     #[test]
@@ -70,11 +70,11 @@ mod tests {
         let home = Path::new("/home/u");
         assert_eq!(
             user_config_path(None, home),
-            PathBuf::from("/home/u/.config/prodgy/config.toml")
+            PathBuf::from("/home/u/.config/dovetail/config.toml")
         );
         assert_eq!(
             user_config_path(Some(OsStr::new("")), home),
-            PathBuf::from("/home/u/.config/prodgy/config.toml")
+            PathBuf::from("/home/u/.config/dovetail/config.toml")
         );
     }
 }

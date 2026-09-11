@@ -813,7 +813,7 @@ mod tests {
         Origin {
             host: Kind::Github,
             owner: "TumbleOwlee".into(),
-            repo: "prodgy".into(),
+            repo: "dovetail".into(),
         }
     }
 
@@ -918,9 +918,9 @@ mod tests {
         let o = github_origin();
         let d = ConfigDialog::new(Some(&o));
         assert_eq!(d.placeholder(Field::Owner), Some("TumbleOwlee"));
-        assert_eq!(d.placeholder(Field::Repo), Some("prodgy"));
+        assert_eq!(d.placeholder(Field::Repo), Some("dovetail"));
         assert_eq!(d.placeholder(Field::Owner), Some("TumbleOwlee"));
-        assert_eq!(d.placeholder(Field::Repo), Some("prodgy"));
+        assert_eq!(d.placeholder(Field::Repo), Some("dovetail"));
         assert_eq!(d.placeholder(Field::BbWorkspace), None);
         let bb = Origin {
             host: Kind::Bitbucket,

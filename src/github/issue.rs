@@ -262,7 +262,7 @@ pub async fn load_issue(
         let response = client
             .post(ENDPOINT)
             .bearer_auth(token)
-            .header(reqwest::header::USER_AGENT, "prodgy")
+            .header(reqwest::header::USER_AGENT, "dovetail")
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(request_body(id, cursor.as_deref()))
             .send()

@@ -91,7 +91,7 @@ fn read(path: &Path) -> Result<Option<String>, ConfigError> {
     }
 }
 
-/// The user entry whose canonical path matches `root`; `.prodgy.toml` is never read.
+/// The user entry whose canonical path matches `root`; `.dovetail.toml` is never read.
 pub fn resolve(user: &UserConfig, root: &Path) -> Option<Settings> {
     entry_for(user, root).map(|entry| Settings {
         board: entry.board.clone(),

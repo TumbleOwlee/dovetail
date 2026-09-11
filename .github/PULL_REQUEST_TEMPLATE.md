@@ -1,5 +1,5 @@
 <!--
-prodgy is spec-driven: docs/specs/ is the authoritative statement of what the
+dovetail is spec-driven: docs/specs/ is the authoritative statement of what the
 software must do. See CONTRIBUTING.md for the full expectations.
 
 Four sections below, in order. Drop one only when genuinely inapplicable

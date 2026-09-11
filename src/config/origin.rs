@@ -78,8 +78,8 @@ mod tests {
     /// TU-R-009 — https, ssh and scp-like GitHub URLs yield owner and repo without `.git`.
     fn ut_parse_github_url_forms() {
         assert_eq!(
-            Origin::parse("https://github.com/TumbleOwlee/prodgy"),
-            gh("TumbleOwlee", "prodgy")
+            Origin::parse("https://github.com/TumbleOwlee/dovetail"),
+            gh("TumbleOwlee", "dovetail")
         );
         assert_eq!(Origin::parse("https://github.com/o/r.git"), gh("o", "r"));
         assert_eq!(Origin::parse("git@github.com:o/r.git"), gh("o", "r"));

@@ -99,7 +99,7 @@ pub async fn load_commit_files(
         let response = client
             .get(commit_page_url(owner, repo, sha, page))
             .bearer_auth(token)
-            .header(reqwest::header::USER_AGENT, "prodgy")
+            .header(reqwest::header::USER_AGENT, "dovetail")
             .header(reqwest::header::ACCEPT, "application/vnd.github+json")
             .send()
             .await?;
@@ -147,7 +147,7 @@ pub async fn load_changed_files(
         let response = client
             .get(page_url(owner, repo, number, page))
             .bearer_auth(token)
-            .header(reqwest::header::USER_AGENT, "prodgy")
+            .header(reqwest::header::USER_AGENT, "dovetail")
             .header(reqwest::header::ACCEPT, "application/vnd.github+json")
             .send()
             .await?;

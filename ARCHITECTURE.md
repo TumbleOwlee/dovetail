@@ -1,6 +1,6 @@
-# Architecture — prodgy
+# Architecture — dovetail
 
-Module map, data flow, concurrency model of `prodgy`. What: [`docs/specs/`](./docs/specs/). Why: [`PRD.md`](./PRD.md).
+Module map, data flow, concurrency model of `dovetail`. What: [`docs/specs/`](./docs/specs/). Why: [`PRD.md`](./PRD.md).
 
 Structure only — no normative "shall" statements (those belong to specs only). Changes with refactors.
 

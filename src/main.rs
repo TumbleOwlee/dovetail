@@ -1,4 +1,4 @@
-//! prodgy: one terminal for the task board, the git remote, and the spec-driven workflow.
+//! dovetail: one terminal for the task board, the git remote, and the spec-driven workflow.
 
 mod app;
 mod atlassian;

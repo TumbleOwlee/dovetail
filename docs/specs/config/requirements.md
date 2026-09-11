@@ -12,8 +12,8 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 
 **CF-R-001** — The application shall resolve the active repository root as the nearest ancestor of the current working directory (the directory itself included) that contains a `.git` entry.
 **CF-R-002** — When no active repository root can be resolved, the application shall print a single-line error to standard error and exit with a non-zero status without entering the alternate screen.
-**CF-R-003** — The user-level configuration file shall be `$XDG_CONFIG_HOME/prodgy/config.toml` when `XDG_CONFIG_HOME` is set and non-empty, and `$HOME/.config/prodgy/config.toml` otherwise.
-**CF-R-004** — The application shall neither read nor write a repository-level configuration file; an existing `.prodgy.toml` in the repository root is ignored.
+**CF-R-003** — The user-level configuration file shall be `$XDG_CONFIG_HOME/dovetail/config.toml` when `XDG_CONFIG_HOME` is set and non-empty, and `$HOME/.config/dovetail/config.toml` otherwise.
+**CF-R-004** — The application shall neither read nor write a repository-level configuration file; an existing `.dovetail.toml` in the repository root is ignored.
 **CF-R-006** — The repository settings shall be taken from the user-level `[[repo]]` entry whose `path` equals the canonical path of the active repository root.
 **CF-R-007** — When the user-level file yields no entry for the active repository, the application shall start with no repository settings.
 **CF-R-008** — A missing user-level file shall be treated as an empty configuration with no profiles and no repository entries.
