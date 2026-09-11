@@ -642,13 +642,13 @@ impl App {
 
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        let [upper, bottom] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-        let [top, middle] =
+        let [left, right] =
             Layout::horizontal([Constraint::Length(tabs::TAB_LINE_WIDTH), Constraint::Min(1)])
-                .areas(upper);
+                .areas(area);
+        let [middle, bottom] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(right);
         let buf = frame.buffer_mut();
-        tabs::render_tab_line(top, buf, self.active_tab);
+        tabs::render_tab_line(left, buf, self.active_tab);
         match self.active_tab {
             Tab::Board => match &self.board {
                 BoardState::Loaded(view) => view.render(middle, buf),
@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-018, TU-R-019, TU-R-023 — tab line on top, an empty body for an unavailable tab, command line at the bottom.
+    /// TU-R-018, TU-R-019, TU-R-023 — tab line at the left over the full height, an empty body for an unavailable tab, command line at the bottom of the remaining columns.
     fn ut_render_layout() {
         let t = TempDir::new("render");
         let mut a = app(&t, Some(settings()));
@@ -1162,7 +1162,7 @@ mod tests {
         );
         assert!(
             !column.contains("frob"),
-            "the tab line ends above the command line"
+            "the command line never runs under the tab line"
         );
         let (row, x) = rows
             .iter()
@@ -1175,7 +1175,13 @@ mod tests {
             rows[row - 1].contains('┌') && rows[row + 1].contains('└'),
             "{rows:?}"
         );
-        assert_eq!(rows[9], "unknown command: frob");
+        assert_eq!(rows[9].trim_start(), "unknown command: frob");
+        assert_eq!(
+            rows[9].find("unknown"),
+            Some(tabs::TAB_LINE_WIDTH as usize),
+            "the command line starts after the tab line: {:?}",
+            rows[9]
+        );
         a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
         key(&mut a, KeyCode::Char('1'));
         let rows = render_rows(60, 10, |f| a.render(f));
@@ -1189,7 +1195,7 @@ mod tests {
         key(&mut a, KeyCode::Char('0'));
         key(&mut a, KeyCode::Char(':'));
         let rows = render_rows(60, 10, |f| a.render(f));
-        assert_eq!(rows[9], ":");
+        assert_eq!(rows[9].trim_start(), ":");
     }
 
     #[test]
@@ -1278,10 +1284,10 @@ mod tests {
         assert!(a.take_fetch_requests().is_empty());
         assert!(a.dialog.is_none());
         let rows = render_rows(100, 30, |f| a.render(f));
-        assert_eq!(rows[29], "loading projects…");
+        assert_eq!(rows[29].trim_start(), "loading projects…");
         key(&mut a, KeyCode::Char('x'));
         let rows = render_rows(100, 30, |f| a.render(f));
-        assert_eq!(rows[29], "loading projects…");
+        assert_eq!(rows[29].trim_start(), "loading projects…");
     }
 
     #[test]

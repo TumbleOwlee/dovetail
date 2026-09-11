@@ -34,7 +34,7 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 
 ## Main view
 
-**TU-R-018** — The main view shall consist of a vertical tab line at the left, the active tab's body filling the rest of the rows above the command line, and the command line occupying the bottom line.
+**TU-R-018** — The main view shall consist of a vertical tab line at the left spanning the full height, the active tab's body filling the remaining columns above the command line, and the command line occupying the bottom line of those remaining columns only.
 **TU-R-019** — The tab line shall stack the tabs `BOARD` and `REPOSITORY` top to bottom, each written one character per row, with one blank column at each side and one blank row above and below its characters, the tabs sharing the line's height evenly; the active tab's cells are drawn in the selected style, the others in the general style.
 **TU-R-020** — Ctrl+T followed by `j` shall activate the next tab and Ctrl+T followed by `k` the previous, wrapping at both ends.
 **TU-R-021** — Ctrl+T followed by a digit shall activate the tab with that zero-based index.
