@@ -1,7 +1,9 @@
 //! Palette overrides on top of ferrowl-ui's fixed color scheme.
 
 use ferrowl_ui::COLOR_SCHEME;
-use ferrowl_ui::style::{InputFieldStyle, ScrollingTabsStyle, SelectionStyle};
+use ferrowl_ui::style::{
+    DiffViewStyle, InputFieldStyle, SelectionStyle, SyntaxTheme, SyntaxThemeBuilder, TabBarStyle,
+};
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 
@@ -20,6 +22,9 @@ pub struct ColorTemplate {
     pub placeholder: Color,
     pub error: Color,
     pub success: Color,
+    pub warning: Color,
+    /// Review mode: the status label background and local-change gutter marks.
+    pub review: Color,
     /// Timeline box borders per entry type.
     pub timeline: TimelineColors,
 }
@@ -51,6 +56,8 @@ pub const TEMPLATE: ColorTemplate = ColorTemplate {
     placeholder: COLOR_SCHEME.placeholder,
     error: COLOR_SCHEME.error,
     success: COLOR_SCHEME.success,
+    warning: COLOR_SCHEME.warning,
+    review: Color::Rgb(110, 64, 170),
     timeline: TimelineColors {
         comment: COLOR_SCHEME.border,
         closed: COLOR_SCHEME.error,
@@ -109,11 +116,32 @@ pub fn selection_style() -> SelectionStyle {
     }
 }
 
+/// The file tree's status styles on [`BG`]: added in the success color, removed in the
+/// error color, modified in the text color.
+pub fn status_theme() -> SyntaxTheme {
+    SyntaxThemeBuilder::default()
+        .added(on_bg(TEMPLATE.success))
+        .removed(on_bg(TEMPLATE.error))
+        .meta(base())
+        .build()
+        .expect("SyntaxTheme fields all default")
+}
+
+/// The scheme's diff widget style on [`BG`]; the added/removed bands keep the scheme's own.
+pub fn diff_view_style() -> DiffViewStyle {
+    DiffViewStyle {
+        general: base(),
+        focused: on_bg(TEMPLATE.hi),
+        border: on_bg(TEMPLATE.border),
+        ..DiffViewStyle::default()
+    }
+}
+
 /// The scheme's tab line style on [`BG`].
-pub fn scrolling_tabs_style() -> ScrollingTabsStyle {
-    ScrollingTabsStyle {
+pub fn tab_bar_style() -> TabBarStyle {
+    TabBarStyle {
         general: on_bg(TEMPLATE.hi).bold(),
-        ..ScrollingTabsStyle::default()
+        ..TabBarStyle::default()
     }
 }
 
@@ -147,7 +175,15 @@ mod tests {
         ] {
             assert_eq!(style.bg, Some(BG), "{style:?}");
         }
-        let tabs = scrolling_tabs_style();
+        let status = status_theme();
+        for style in [status.added, status.removed, status.meta] {
+            assert_eq!(style.bg, Some(BG), "{style:?}");
+        }
+        let diff = diff_view_style();
+        for style in [diff.general, diff.focused, diff.border] {
+            assert_eq!(style.bg, Some(BG), "{style:?}");
+        }
+        let tabs = tab_bar_style();
         assert_eq!(tabs.general.bg, Some(BG));
         assert_eq!(tabs.selected.bg, Some(TEMPLATE.hi_bg));
         assert_eq!(base().bg, Some(BG));

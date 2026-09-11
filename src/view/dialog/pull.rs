@@ -77,6 +77,8 @@ pub fn content(details: PullDetails) -> DetailsContent {
             owner: owner.to_string(),
             repo: repo.to_string(),
             head_oid: details.head_oid,
+            pull_id: details.id,
+            threads: details.threads,
         },
         title: details.title,
         state,
@@ -160,6 +162,7 @@ mod tests {
             patch: None,
         };
         let details = PullDetails {
+            id: "PR_5".into(),
             number: 5,
             title: "Fix crash".into(),
             body: "b".into(),
@@ -228,6 +231,8 @@ mod tests {
                 owner: "o".into(),
                 repo: "r".into(),
                 head_oid: "abc".into(),
+                pull_id: "PR_5".into(),
+                threads: vec![],
             }
         );
         assert_eq!(

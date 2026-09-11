@@ -6,11 +6,12 @@ use super::board::Label;
 use super::files::{self, ChangedFile};
 use super::projects::GithubError;
 use super::pulls::PullState;
+use super::review;
 use super::timeline::{self, TimelineItem};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
-const QUERY_HEAD: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id number title body state isDraft url headRefOid repository { nameWithOwner } author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } } latestReviews(first: 20) { nodes { state author { login } } } assignees(first: 10) { nodes { login } } labels(first: 20) { nodes { name color } } projectItems(first: 10) { nodes { project { title } } } milestone { title } closingIssuesReferences(first: 10) { nodes { id number title } } participants(first: 20) { nodes { login } } commits(first: 100) { nodes { commit { abbreviatedOid messageHeadline committedDate author { name user { login } } } } }";
+const QUERY_HEAD: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id number title body state isDraft url headRefOid repository { nameWithOwner } author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } } latestReviews(first: 20) { nodes { state author { login } } } assignees(first: 10) { nodes { login } } labels(first: 20) { nodes { name color } } projectItems(first: 10) { nodes { project { title } } } milestone { title } closingIssuesReferences(first: 10) { nodes { id number title } } participants(first: 20) { nodes { login } } commits(first: 100) { nodes { commit { abbreviatedOid messageHeadline committedDate author { name user { login } } } } } reviewThreads(first: 100) { nodes { id isResolved isOutdated path diffSide line startLine originalLine originalStartLine comments(first: 100) { nodes { author { login } body } } } }";
 
 const QUERY_TAIL: &str = " } } }";
 
@@ -58,7 +59,33 @@ pub struct PullDetails {
     pub commits: Vec<Commit>,
     /// Filled by `load_pull_request` from the REST files endpoint; empty in a parsed page.
     pub files: Vec<ChangedFile>,
+    /// Review comment threads on the diff, resolved ones included.
+    pub threads: Vec<ReviewThread>,
     pub timeline: Vec<TimelineItem>,
+}
+
+/// One comment of a review thread; `author` is `None` when the account was deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadComment {
+    pub author: Option<String>,
+    pub body: String,
+}
+
+/// One review comment thread anchored to a file line range of the pull request diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewThread {
+    /// GraphQL node id, the handle for replies.
+    pub id: String,
+    pub path: String,
+    pub side: review::Side,
+    /// First line of the range; equal to `line` for a single line.
+    pub start_line: u32,
+    /// Last line, or the only one.
+    pub line: u32,
+    pub resolved: bool,
+    /// The diff moved on; the lines are the original anchor.
+    pub outdated: bool,
+    pub comments: Vec<ThreadComment>,
 }
 
 /// Who authored a commit: the GitHub account it is linked to, or only the git author name.
@@ -172,7 +199,59 @@ struct Node {
     closing_issues_references: Nodes<IssueRef>,
     participants: Nodes<Author>,
     commits: Nodes<CommitNode>,
+    review_threads: Nodes<ThreadNode>,
     timeline_items: timeline::Connection,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadNode {
+    id: String,
+    is_resolved: bool,
+    is_outdated: bool,
+    path: String,
+    diff_side: review::Side,
+    line: Option<u32>,
+    start_line: Option<u32>,
+    original_line: Option<u32>,
+    original_start_line: Option<u32>,
+    comments: Nodes<CommentNode>,
+}
+
+#[derive(Deserialize)]
+struct CommentNode {
+    author: Option<Author>,
+    body: String,
+}
+
+/// The threads with an anchor line: `line` falls back to `originalLine` for an outdated
+/// thread, `startLine` to `originalStartLine` to `line`; a thread with neither is dropped.
+fn review_threads(nodes: Vec<ThreadNode>) -> Vec<ReviewThread> {
+    nodes
+        .into_iter()
+        .filter_map(|t| {
+            let line = t.line.or(t.original_line)?;
+            let start_line = t.start_line.or(t.original_start_line).unwrap_or(line);
+            Some(ReviewThread {
+                id: t.id,
+                path: t.path,
+                side: t.diff_side,
+                start_line,
+                line,
+                resolved: t.is_resolved,
+                outdated: t.is_outdated,
+                comments: t
+                    .comments
+                    .nodes
+                    .into_iter()
+                    .map(|c| ThreadComment {
+                        author: c.author.map(|a| a.login),
+                        body: c.body,
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -355,6 +434,7 @@ pub fn parse_page(body: &str) -> Result<Page, GithubError> {
                 })
                 .collect(),
             files: Vec::new(),
+            threads: review_threads(node.review_threads.nodes),
             timeline,
         },
         next_cursor,
@@ -408,6 +488,11 @@ mod tests {
         "projectItems":{"nodes":[{"project":{"title":"Roadmap"}}]},"milestone":{"title":"v1"},
         "closingIssuesReferences":{"nodes":[{"id":"I_7","number":7,"title":"Crash on start"}]},"participants":{"nodes":[{"login":"octo"},{"login":"a"}]},
         "commits":{"nodes":[{"commit":{"abbreviatedOid":"abc1234","messageHeadline":"Fix crash","committedDate":"2026-09-03T10:00:00Z","author":{"name":"Octo Cat","user":{"login":"octo"}}}},{"commit":{"abbreviatedOid":"def5678","messageHeadline":"Add test","committedDate":"2026-09-04T10:00:00Z","author":{"name":"Anon","user":null}}}]},
+        "reviewThreads":{"nodes":[
+        {"id":"TH_1","isResolved":false,"isOutdated":false,"path":"src/main.rs","diffSide":"RIGHT","line":4,"startLine":2,"originalLine":null,"originalStartLine":null,"comments":{"nodes":[{"author":{"login":"a"},"body":"why?"},{"author":null,"body":"gone"}]}},
+        {"id":"TH_2","isResolved":true,"isOutdated":false,"path":"src/main.rs","diffSide":"LEFT","line":9,"startLine":null,"originalLine":null,"originalStartLine":null,"comments":{"nodes":[{"author":{"login":"b"},"body":"done"}]}},
+        {"id":"TH_3","isResolved":false,"isOutdated":true,"path":"old.rs","diffSide":"RIGHT","line":null,"startLine":null,"originalLine":7,"originalStartLine":6,"comments":{"nodes":[]}},
+        {"id":"TH_4","isResolved":false,"isOutdated":true,"path":"gone.rs","diffSide":"RIGHT","line":null,"startLine":null,"originalLine":null,"originalStartLine":null,"comments":{"nodes":[]}}]},
         "timelineItems":{"pageInfo":{"hasNextPage":true,"endCursor":"cur"},"nodes":[
         {"__typename":"IssueComment","body":"LGTM","createdAt":"2026-09-04T10:00:00Z","author":{"login":"a"}},
         {"__typename":"MergedEvent","actor":null,"createdAt":"2026-09-05T10:00:00Z"}
@@ -435,6 +520,7 @@ mod tests {
             "closingIssuesReferences(first: 10) { nodes { id number title } }",
             "participants(first: 20) { nodes { login } }",
             "commits(first: 100) { nodes { commit { abbreviatedOid messageHeadline committedDate author { name user { login } } } } }",
+            "reviewThreads(first: 100) { nodes { id isResolved isOutdated path diffSide line startLine originalLine originalStartLine comments(first: 100) { nodes { author { login } body } } } }",
             "timelineItems(first: 100, after: $after, itemTypes: [ISSUE_COMMENT, ",
             "MERGED_EVENT, REVIEW_REQUESTED_EVENT, PULL_REQUEST_REVIEW,",
             "... on MergedEvent { actor { login } createdAt }",
@@ -524,6 +610,50 @@ mod tests {
         );
         let bare = BODY.replace(r#""milestone":{"title":"v1"}"#, r#""milestone":null"#);
         assert_eq!(parse_page(&bare).expect("parses").details.milestone, None);
+    }
+
+    #[test]
+    /// GH-R-023 — review threads carry their id, path, side, resolved and outdated flags and comments with a deleted author as `None`; an outdated thread's lines fall back to the original anchor; a missing `startLine` equals `line`; a thread with no line at all is dropped.
+    fn ut_parse_review_threads() {
+        let threads = parse_page(BODY).expect("parses").details.threads;
+        assert_eq!(threads.len(), 3, "the unanchored thread is dropped");
+        assert_eq!(
+            threads[0],
+            ReviewThread {
+                id: "TH_1".into(),
+                path: "src/main.rs".into(),
+                side: review::Side::Right,
+                start_line: 2,
+                line: 4,
+                resolved: false,
+                outdated: false,
+                comments: vec![
+                    ThreadComment {
+                        author: Some("a".into()),
+                        body: "why?".into()
+                    },
+                    ThreadComment {
+                        author: None,
+                        body: "gone".into()
+                    },
+                ],
+            }
+        );
+        assert_eq!(
+            (
+                threads[1].resolved,
+                threads[1].side,
+                threads[1].start_line,
+                threads[1].line
+            ),
+            (true, review::Side::Left, 9, 9),
+            "startLine falls back to line"
+        );
+        assert_eq!(
+            (threads[2].outdated, threads[2].start_line, threads[2].line),
+            (true, 6, 7),
+            "outdated lines fall back to the original anchor"
+        );
     }
 
     #[test]

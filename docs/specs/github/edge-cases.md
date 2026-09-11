@@ -40,4 +40,4 @@ table rows included. Cite the governing requirement inline.
 **GH-E-011** — A changed file without a `patch` field (binary, or a diff GitHub considers too large) is loaded with no patch; an unknown `status` value is loaded as `changed`. Cites GH-R-019.
 **GH-E-012** — A path that does not exist at the commit (a file removed by the pull request, or a wrong path) yields a null object and the typed error `blob not found`. Cites GH-R-020.
 **GH-E-013** — A comment on one line sends `line` and `side` only; a range sends `startLine` as its first line with `startSide` equal to `side` and `line` as its last. Cites GH-R-021.
-**GH-E-014** — When a step fails, the outcome still carries the review id created so far and the number of threads added, so a later attempt adds only the remaining comments to that review and a discard can delete it. Cites GH-R-021.
+**GH-E-014** — When a step fails, the outcome still carries the review id created so far and the numbers of threads and replies added, so a later attempt adds only the remaining comments and replies to that review and a discard can delete it. Cites GH-R-021.

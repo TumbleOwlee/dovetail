@@ -54,6 +54,69 @@ pub fn parse_files(body: &str) -> Result<Vec<ChangedFile>, GithubError> {
         .collect())
 }
 
+/// The URL of one page of a commit's files listing.
+pub fn commit_page_url(owner: &str, repo: &str, sha: &str, page: usize) -> String {
+    format!(
+        "https://api.github.com/repos/{owner}/{repo}/commits/{sha}?per_page={PER_PAGE}&page={page}"
+    )
+}
+
+/// The files of one page of a commit response; an absent `files` array is no files.
+pub fn parse_commit_files(body: &str) -> Result<Vec<ChangedFile>, GithubError> {
+    let commit: CommitBody =
+        serde_json::from_str(body).map_err(|e| GithubError::Decode(e.to_string()))?;
+    Ok(commit
+        .files
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| ChangedFile {
+            path: e.filename,
+            previous_path: e.previous_filename,
+            status: e.status.unwrap_or(FileStatus::Changed),
+            additions: e.additions,
+            deletions: e.deletions,
+            patch: e.patch,
+        })
+        .collect())
+}
+
+/// A commit response: only its `files` array matters here.
+#[derive(Deserialize)]
+struct CommitBody {
+    files: Option<Vec<Entry>>,
+}
+
+/// Every changed file of a commit, paging while a page is full.
+pub async fn load_commit_files(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    sha: &str,
+) -> Result<Vec<ChangedFile>, GithubError> {
+    let mut files = Vec::new();
+    for page in 1.. {
+        let response = client
+            .get(commit_page_url(owner, repo, sha, page))
+            .bearer_auth(token)
+            .header(reqwest::header::USER_AGENT, "prodgy")
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(GithubError::Status(status.as_u16()));
+        }
+        let batch = parse_commit_files(&response.text().await?)?;
+        let full = batch.len() >= PER_PAGE;
+        files.extend(batch);
+        if !full {
+            break;
+        }
+    }
+    Ok(files)
+}
+
 /// One entry of the listing; an unknown `status` decodes as `None`.
 #[derive(Deserialize)]
 struct Entry {
@@ -172,6 +235,53 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    /// GH-R-022 — the commit page URL names the commit, 100 per page and the page number.
+    fn ut_commit_page_url() {
+        assert_eq!(
+            commit_page_url("o", "r", "abc123", 2),
+            "https://api.github.com/repos/o/r/commits/abc123?per_page=100&page=2"
+        );
+    }
+
+    #[test]
+    /// GH-R-022 — a commit's files decode from its `files` array with the GH-R-019 fields; an absent array is no files; garbage and a truncated body are decode errors.
+    fn ut_parse_commit_files() {
+        let body = format!(r#"{{"sha":"abc","commit":{{"message":"m"}},"files":{BODY}}}"#);
+        let files = parse_commit_files(&body).expect("decodes");
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].path, "src/main.rs");
+        assert_eq!(files[0].status, FileStatus::Modified);
+        assert!(files[0].patch.as_deref().is_some_and(|p| p.contains("@@")));
+        assert_eq!(files[1].previous_path.as_deref(), Some("docs/old.md"));
+        assert_eq!(files[2].status, FileStatus::Changed, "unknown status");
+        assert!(
+            parse_commit_files(r#"{"sha":"abc"}"#)
+                .expect("absent files")
+                .is_empty()
+        );
+        for body in ["", "not json", "[1,2", "[]"] {
+            assert!(
+                matches!(parse_commit_files(body), Err(GithubError::Decode(_))),
+                "{body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    /// GH-R-022 — an unreachable host is a typed HTTP error for the commit files load too.
+    async fn ut_load_commit_files_unreachable_is_http_error() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).expect("proxy url"))
+            .build()
+            .expect("client");
+        let result = load_commit_files(&client, "t", "o", "r", "abc").await;
+        assert!(matches!(result, Err(GithubError::Http(_))), "{result:?}");
     }
 
     #[tokio::test]

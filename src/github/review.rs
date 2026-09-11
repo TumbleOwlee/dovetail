@@ -1,7 +1,4 @@
 //! Submitting and discarding a pull request review through GraphQL mutations.
-// Consumed once the pull request overlay has a comment prompt and a command line to drive the
-// review flow, which wait on the editor dialog and command line widgets of ferrowl-ui #326.
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
@@ -13,12 +10,14 @@ const CREATE: &str = "mutation($pull: ID!, $commit: GitObjectID!) { addPullReque
 
 const THREAD: &str = "mutation($review: ID!, $path: String!, $body: String!, $line: Int!, $side: DiffSide!, $startLine: Int, $startSide: DiffSide) { addPullRequestReviewThread(input: {pullRequestReviewId: $review, path: $path, body: $body, line: $line, side: $side, startLine: $startLine, startSide: $startSide}) { thread { id } } }";
 
+const REPLY: &str = "mutation($review: ID!, $thread: ID!, $body: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewId: $review, pullRequestReviewThreadId: $thread, body: $body}) { comment { id } } }";
+
 const SUBMIT: &str = "mutation($review: ID!, $event: PullRequestReviewEvent!, $body: String) { submitPullRequestReview(input: {pullRequestReviewId: $review, event: $event, body: $body}) { pullRequestReview { id } } }";
 
 const DELETE: &str = "mutation($review: ID!) { deletePullRequestReview(input: {pullRequestReviewId: $review}) { pullRequestReview { id } } }";
 
 /// Which state of the file a comment addresses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Side {
     /// The old state.
@@ -47,6 +46,14 @@ pub struct Thread {
     pub body: String,
 }
 
+/// A reply to an existing review thread, sent as part of the pending review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reply {
+    /// The thread's GraphQL node id.
+    pub thread_id: String,
+    pub body: String,
+}
+
 /// What to do with a review.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewAction {
@@ -57,6 +64,8 @@ pub enum ReviewAction {
         review_id: Option<String>,
         /// Comments not yet sent.
         threads: Vec<Thread>,
+        /// Replies to existing threads not yet sent.
+        replies: Vec<Reply>,
         verdict: Verdict,
         body: String,
     },
@@ -72,11 +81,12 @@ pub enum ReviewOutcome {
 }
 
 /// The progress an action made, whatever its outcome: the review id in play and the number of
-/// threads added, so a failure can be continued or discarded.
+/// threads and replies added, so a failure can be continued or discarded.
 #[derive(Debug)]
 pub struct ReviewResult {
     pub review_id: Option<String>,
     pub added: usize,
+    pub replied: usize,
     pub outcome: Result<ReviewOutcome, GithubError>,
 }
 
@@ -139,6 +149,24 @@ pub fn thread_body(review_id: &str, thread: &Thread) -> String {
 }
 
 #[derive(Serialize)]
+struct ReplyVariables<'a> {
+    review: &'a str,
+    thread: &'a str,
+    body: &'a str,
+}
+
+pub fn reply_body(review_id: &str, reply: &Reply) -> String {
+    body(
+        REPLY,
+        ReplyVariables {
+            review: review_id,
+            thread: &reply.thread_id,
+            body: &reply.body,
+        },
+    )
+}
+
+#[derive(Serialize)]
 struct SubmitVariables<'a> {
     review: &'a str,
     event: Verdict,
@@ -181,6 +209,7 @@ struct GraphqlError {
 struct Data {
     add_pull_request_review: Option<ReviewPayload>,
     add_pull_request_review_thread: Option<ThreadPayload>,
+    add_pull_request_review_thread_reply: Option<ReplyPayload>,
     submit_pull_request_review: Option<ReviewPayload>,
     delete_pull_request_review: Option<ReviewPayload>,
 }
@@ -197,12 +226,17 @@ struct ThreadPayload {
 }
 
 #[derive(Deserialize)]
+struct ReplyPayload {
+    comment: Option<Node>,
+}
+
+#[derive(Deserialize)]
 struct Node {
     id: String,
 }
 
 /// The node id a mutation response returns: the review's for create, submit and delete, the
-/// thread's for a thread.
+/// thread's for a thread, the comment's for a reply.
 pub fn parse_id(body: &str) -> Result<String, GithubError> {
     let response: Response =
         serde_json::from_str(body).map_err(|e| GithubError::Decode(e.to_string()))?;
@@ -221,6 +255,10 @@ pub fn parse_id(body: &str) -> Result<String, GithubError> {
         .or(data.delete_pull_request_review)
         .and_then(|p| p.pull_request_review)
         .or_else(|| data.add_pull_request_review_thread.and_then(|p| p.thread))
+        .or_else(|| {
+            data.add_pull_request_review_thread_reply
+                .and_then(|p| p.comment)
+        })
         .ok_or_else(|| GithubError::Decode("no node in the mutation payload".into()))?;
     Ok(node.id)
 }
@@ -255,6 +293,7 @@ pub async fn run(client: &reqwest::Client, token: &str, action: ReviewAction) ->
             ReviewResult {
                 review_id: Some(review_id),
                 added: 0,
+                replied: 0,
                 outcome,
             }
         }
@@ -263,12 +302,14 @@ pub async fn run(client: &reqwest::Client, token: &str, action: ReviewAction) ->
             head_oid,
             review_id,
             threads,
+            replies,
             verdict,
             body: summary,
         } => {
             let mut result = ReviewResult {
                 review_id,
                 added: 0,
+                replied: 0,
                 outcome: Ok(ReviewOutcome::Submitted),
             };
             let review_id = match result.review_id.clone() {
@@ -290,6 +331,13 @@ pub async fn run(client: &reqwest::Client, token: &str, action: ReviewAction) ->
                     return result;
                 }
                 result.added += 1;
+            }
+            for reply in &replies {
+                if let Err(e) = mutate(client, token, reply_body(&review_id, reply)).await {
+                    result.outcome = Err(e);
+                    return result;
+                }
+                result.replied += 1;
             }
             if let Err(e) = mutate(client, token, submit_body(&review_id, verdict, &summary)).await
             {
@@ -377,6 +425,20 @@ mod tests {
             "COMMENT"
         );
 
+        let reply = json(&reply_body(
+            "RV_1",
+            &Reply {
+                thread_id: "TH_1".into(),
+                body: "agreed".into(),
+            },
+        ));
+        assert!(reply["query"].as_str().expect("q").contains(
+            "addPullRequestReviewThreadReply(input: {pullRequestReviewId: $review, pullRequestReviewThreadId: $thread, body: $body})"
+        ));
+        assert_eq!(reply["variables"]["review"], "RV_1");
+        assert_eq!(reply["variables"]["thread"], "TH_1");
+        assert_eq!(reply["variables"]["body"], "agreed");
+
         let delete = json(&delete_body("RV_1"));
         assert!(
             delete["query"]
@@ -409,6 +471,11 @@ mod tests {
             parse_id(r#"{"data":{"deletePullRequestReview":{"pullRequestReview":{"id":"RV_1"}}}}"#)
                 .expect("id"),
             "RV_1"
+        );
+        assert_eq!(
+            parse_id(r#"{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"C_1"}}}}"#)
+                .expect("id"),
+            "C_1"
         );
         assert!(matches!(
             parse_id(r#"{"data":null,"errors":[{"message":"Resource not accessible"}]}"#),
@@ -447,6 +514,7 @@ mod tests {
                 head_oid: "abc".into(),
                 review_id: None,
                 threads: vec![],
+                replies: vec![],
                 verdict: Verdict::Approve,
                 body: String::new(),
             },
@@ -471,6 +539,10 @@ mod tests {
                     start_line: 1,
                     line: 1,
                     body: "b".into(),
+                }],
+                replies: vec![Reply {
+                    thread_id: "TH_1".into(),
+                    body: "agreed".into(),
                 }],
                 verdict: Verdict::Comment,
                 body: String::new(),

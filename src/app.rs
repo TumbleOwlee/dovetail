@@ -13,11 +13,12 @@ use crate::config::{
     store,
 };
 use crate::event::Message;
+use crate::github::review::ReviewAction;
 use crate::view::board::{self, BoardView};
 use crate::view::command_line::{CommandLine, CommandLineEvent};
 use crate::view::dialog::config::{BoardForm, ConfigDialog, DialogEvent, RemoteForm};
 use crate::view::dialog::config::{Choice, Field};
-use crate::view::dialog::details::{BlobRef, DetailsDialog, DetailsEvent, Link};
+use crate::view::dialog::details::{BlobRef, CommitRef, DetailsDialog, DetailsEvent, Link};
 use crate::view::dialog::{issue, pull};
 use crate::view::notice;
 use crate::view::remote::RemoteView;
@@ -61,6 +62,16 @@ pub enum FetchRequest {
         repo: String,
         oid: String,
         path: String,
+    },
+    Commit {
+        token: String,
+        owner: String,
+        repo: String,
+        sha: String,
+    },
+    Review {
+        token: String,
+        action: ReviewAction,
     },
 }
 
@@ -299,6 +310,39 @@ impl App {
         });
     }
 
+    /// Queues the commit files request of the pull request overlay, with either GitHub
+    /// token.
+    fn request_commit(&mut self, commit: CommitRef) {
+        let Some(token) = self
+            .github_remote()
+            .map(|(_, _, t)| t)
+            .or_else(|| self.github_board().map(|(_, _, t)| t))
+        else {
+            return;
+        };
+        self.pending_fetches.push(FetchRequest::Commit {
+            token: token.to_string(),
+            owner: commit.owner,
+            repo: commit.repo,
+            sha: commit.sha,
+        });
+    }
+
+    /// Queues a review mutation of the pull request overlay, with either GitHub token.
+    fn request_review(&mut self, action: ReviewAction) {
+        let Some(token) = self
+            .github_remote()
+            .map(|(_, _, t)| t)
+            .or_else(|| self.github_board().map(|(_, _, t)| t))
+        else {
+            return;
+        };
+        self.pending_fetches.push(FetchRequest::Review {
+            token: token.to_string(),
+            action,
+        });
+    }
+
     /// Fetches queued since the last call, for the loop to run.
     pub fn take_fetch_requests(&mut self) -> Vec<FetchRequest> {
         std::mem::take(&mut self.pending_fetches)
@@ -328,10 +372,23 @@ impl App {
             }
             return;
         }
-        if let Message::Blob { path, result } = message {
+        if let Message::Blob { oid, path, result } = message {
             if let Some(dialog) = self.pull.as_mut() {
-                let blob = dialog.handle_blob(&path, result);
+                let blob = dialog.handle_blob(&oid, &path, result);
                 self.request_blob(blob);
+            }
+            return;
+        }
+        if let Message::CommitFiles { sha, result } = message {
+            if let Some(dialog) = self.pull.as_mut() {
+                let blob = dialog.handle_commit(&sha, result);
+                self.request_blob(blob);
+            }
+            return;
+        }
+        if let Message::Review(result) = message {
+            if let Some(dialog) = self.pull.as_mut() {
+                dialog.handle_review(result);
             }
             return;
         }
@@ -372,7 +429,9 @@ impl App {
             | Message::Issue(_)
             | Message::PullRequests(_)
             | Message::PullRequest(_)
-            | Message::Blob { .. } => {
+            | Message::Blob { .. }
+            | Message::CommitFiles { .. }
+            | Message::Review(_) => {
                 unreachable!("handled above")
             }
         };
@@ -421,7 +480,8 @@ impl App {
                     self.issue = None;
                     self.open_link(link);
                 }
-                DetailsEvent::Fetch(_) => {}
+                DetailsEvent::Fetch(_) | DetailsEvent::FetchCommit(_) | DetailsEvent::Review(_) => {
+                }
             }
             return;
         }
@@ -434,6 +494,8 @@ impl App {
                     self.open_link(link);
                 }
                 DetailsEvent::Fetch(blob) => self.request_blob(Some(blob)),
+                DetailsEvent::FetchCommit(commit) => self.request_commit(commit),
+                DetailsEvent::Review(action) => self.request_review(action),
             }
             return;
         }
@@ -514,10 +576,10 @@ impl App {
         }
         self.command_line.render(bottom, buf);
         if let Some(issue) = self.issue.as_mut() {
-            issue.render(area, buf);
+            issue.render(middle, buf);
         }
         if let Some(pull) = self.pull.as_mut() {
-            pull.render(area, buf);
+            pull.render(middle, buf);
         }
         if let Some(dialog) = self.dialog.as_mut() {
             dialog.render(area, buf);
@@ -1546,6 +1608,7 @@ mod tests {
         };
         assert_eq!(a.take_fetch_requests(), vec![blob("a.rs")]);
         a.handle_message(Message::Blob {
+            oid: "0123abcd".into(),
             path: "a.rs".into(),
             result: Ok(Blob::Text("y\n".into())),
         });
@@ -1559,8 +1622,9 @@ mod tests {
         key(&mut a, KeyCode::Char('2'));
         let rows = render_rows(100, 30, |f| a.render(f));
         assert!(
-            rows.iter()
-                .any(|r| r.contains("1 -x") && r.contains("1 +y")),
+            rows.iter().any(|r| r.matches('x').count() == 1
+                && r.matches('y').count() == 1
+                && r.contains('│')),
             "{rows:?}"
         );
         key(&mut a, KeyCode::Char('j'));
@@ -1568,6 +1632,7 @@ mod tests {
         key(&mut a, KeyCode::Esc);
         assert!(a.pull.is_none());
         a.handle_message(Message::Blob {
+            oid: "0123abcd".into(),
             path: "b.rs".into(),
             result: Ok(Blob::Binary),
         });

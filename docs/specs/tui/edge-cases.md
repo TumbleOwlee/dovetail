@@ -60,18 +60,27 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-028** | A timeline item's actor account was deleted | The title shows `@ghost`; cites TU-R-066 |
 | **TU-E-029** | Enter in a details overlay with the focus outside `Development`, or on an empty `Development` box | Nothing happens; the overlay stays open; cites TU-R-071 |
 | **TU-E-030** | Enter on a `Development` entry while the target tab's list is unavailable, loading or failed | The tab switches and the overlay opens anyway; the list underneath keeps its state; cites TU-R-071 |
-| **TU-E-031** | The selected changed file has no patch | Both diff sides read `No diff available` in the placeholder color; no content is requested; cites TU-R-074, TU-R-076 |
-| **TU-E-032** | A patch holds a hunk header without parseable line starts, or a line with no `+`, `-`, space or `\\` prefix | The hunk is applied where the previous one ended; the line is shown as context; a truncated patch never fails to render; cites TU-R-074 |
-| **TU-E-033** | The pull request has no changed files | The tree reads `None`; both diff sides are empty; `j`, `k` and Tab do nothing harmful; cites TU-R-074 |
+| **TU-E-031** | The selected changed file has no patch | The diff panel reads `No diff available` in the placeholder color; no content is requested; cites TU-R-074, TU-R-076 |
+| **TU-E-032** | A patch is hostile, truncated or holds unparseable lines | The diff widget renders what parses; never a crash; cites TU-R-074 |
+| **TU-E-033** | The pull request has no changed files | The tree is empty; the diff panel is empty; keys do nothing harmful; cites TU-R-074 |
 | **TU-E-034** | Ctrl+T in the issue details overlay, or a digit beyond the last overlay tab after Ctrl+T | Consumed without effect; cites TU-R-072 |
-| **TU-E-035** | The selected file is binary at the head commit | Both diff sides read `Binary file` in the placeholder color; the file stays in the tree; cites TU-R-074 |
-| **TU-E-036** | The selected file's content is too large for the API to return as text | Both diff sides read `File too large` in the placeholder color; the file stays in the tree; cites TU-R-074 |
-| **TU-E-037** | The selected file was removed | The old side lists the patch's removed lines, the new side only blank rows; cites TU-R-074, TU-R-076 |
-| **TU-E-038** | The head content holds fewer lines than the patch addresses | The patch's own text stands in for the missing lines; never a crash; cites TU-R-074 |
+| **TU-E-035** | The selected file is binary at the head commit | The diff panel keeps the hunk-only patch view; the file stays in the tree; cites TU-R-074, TU-R-076 |
+| **TU-E-036** | The selected file's content is too large for the API to return as text | The diff panel keeps the hunk-only patch view; the file stays in the tree; cites TU-R-074, TU-R-076 |
+| **TU-E-037** | The selected file was removed | The old pane lists the patch's removed lines, the new pane only filler rows; cites TU-R-074, TU-R-076 |
 | **TU-E-039** | A file's content arrives after the overlay was closed, or for a path not in the tree | Discarded; cites TU-R-076 |
-| **TU-E-040** | Focus moves to a diff side while it shows a notice instead of a file | The side's border still shows the focus; navigation keys do nothing; cites TU-R-075 |
-| **TU-E-041** | `h` at the first column, or `l` at the widest row's last column, on a diff side | Nothing moves; the scroll never leaves the row; cites TU-R-075 |
-| **TU-E-042** | A row of a diff side is shorter than the horizontal scroll | The row shows only its gutter until scrolled back; cites TU-R-075 |
+| **TU-E-040** | Focus moves to the diff panel while it shows a notice instead of a diff | The panel's border still shows the focus; navigation keys do nothing; cites TU-R-075 |
 | **TU-E-043** | A markdown body is empty or whitespace only | The card holds only its header lines; the body takes no rows; cites TU-R-077 |
 | **TU-E-044** | The terminal has fewer rows than the stacked tab titles need | The tab line scrolls just far enough to keep the active tab's rows visible; cites TU-R-019 |
-| **TU-E-045** | A paging key reaches a diff side before the tab was ever drawn | A page is one row, half a page one row too; cites TU-R-075 |
+| **TU-E-046** | Esc on the focused diff panel while the widget's visual mode is active | The widget leaves visual mode; the overlay stays open; the next Esc closes it; cites TU-R-075 |
+| **TU-E-047** | Enter on a commit whose file list request failed | The list is requested again, the panel back to `Loading commit..`; cites TU-R-078 |
+| **TU-E-048** | Enter on the commit table with no commits | Nothing happens; the table stays; cites TU-R-078 |
+| **TU-E-049** | A file content response arrives | It is matched by commit id and path: the head commit's go to the `Files Changed` tab, an open or cached commit diff's to that commit, any other is discarded; cites TU-R-076, TU-R-078 |
+| **TU-E-050** | A commit file list arrives for a commit never requested, or after the overlay closed | Discarded; cites TU-R-078 |
+| **TU-E-051** | `submit` with a missing or unknown verdict | `usage: submit approve\|changes\|comment [summary]` in the status line; nothing is sent; cites TU-R-084 |
+| **TU-E-052** | `submit` or `discard` while review mode is inactive, or `c`/`r` outside review mode | `no review: run :review` in the status line; nothing changes; cites TU-R-080, TU-R-082, TU-R-083 |
+| **TU-E-053** | `c` while the diff shows a notice, or on rows with no file line on the focused side | `no line to comment` in the status line; no draft is created; cites TU-R-082 |
+| **TU-E-054** | `submit` or `discard` while a submit request runs, or `c`/`r` while it runs | `review busy` in the status line; nothing changes; cites TU-R-084 |
+| **TU-E-055** | The overlay closes while review mode is active | Local drafts, pending replies and a held review id are dropped; a review created on GitHub stays there; cites TU-R-084 |
+| **TU-E-056** | `review` while review mode is already active | `review already started` in the status line; cites TU-R-080 |
+| **TU-E-057** | `submit` with no local drafts and no pending replies | Allowed: the review submits with the verdict and summary alone; cites TU-R-084 |
+| **TU-E-058** | An unknown command in the overlay command line | `unknown command: <input>` in the status line; cites TU-R-079 |

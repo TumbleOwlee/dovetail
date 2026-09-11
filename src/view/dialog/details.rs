@@ -3,9 +3,10 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ferrowl_ui::state::{
-    CodeInputFieldStateBuilder, MarkdownInputFieldState, MarkdownInputFieldStateBuilder,
+    CodeInputFieldStateBuilder, CommandLineOutcome, CommandLineState, MarkdownInputFieldState,
+    MarkdownInputFieldStateBuilder,
 };
-use ferrowl_ui::widgets::{MarkdownInputField, MarkdownInputFieldBuilder};
+use ferrowl_ui::widgets::{CommandLineBuilder, MarkdownInputField, MarkdownInputFieldBuilder};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, HorizontalAlignment, Layout, Margin, Rect};
 use ratatui::style::{Color, Style};
@@ -15,14 +16,16 @@ use ratatui::widgets::{Block, Clear, Paragraph, StatefulWidget, Widget};
 use crate::github::blob::Blob;
 use crate::github::board::Label;
 use crate::github::files::ChangedFile;
-use crate::github::pull::{Commit, ReviewState};
+use crate::github::pull::{Commit, ReviewState, ReviewThread};
+use crate::github::review::{ReviewAction, ReviewOutcome, ReviewResult, Verdict};
 use crate::github::timeline::{Event, TimelineItem};
 use crate::view::board::{badge_text_color, label_color};
-use crate::view::dialog::{commits::CommitsView, files::FilesState};
+use crate::view::dialog::commits::{CommitRequest, CommitsView};
+use crate::view::dialog::files::FilesState;
 use crate::view::{notice, tabs, theme};
 
 /// Screen cells left free around the overlay on each side.
-const INSET: Margin = Margin::new(4, 3);
+const INSET: Margin = Margin::new(1, 1);
 
 /// Space between a card's borders and its text: two columns, one row.
 const CARD_MARGIN: Margin = Margin::new(2, 1);
@@ -71,6 +74,10 @@ pub enum Panes {
         repo: String,
         /// The head commit whose blobs the `Files Changed` tab shows.
         head_oid: String,
+        /// GraphQL node id, the handle for review mutations.
+        pull_id: String,
+        /// Review comment threads on the diff.
+        threads: Vec<ReviewThread>,
     },
 }
 
@@ -98,6 +105,27 @@ fn blob_ref(panes: &Panes, path: String) -> Option<BlobRef> {
             path,
         }),
     }
+}
+
+/// The reference for a file's content at a commit of the pull request.
+fn commit_blob_ref(panes: &Panes, sha: String, path: String) -> Option<BlobRef> {
+    match panes {
+        Panes::Conversation => None,
+        Panes::Pull { owner, repo, .. } => Some(BlobRef {
+            owner: owner.clone(),
+            repo: repo.clone(),
+            oid: sha,
+            path,
+        }),
+    }
+}
+
+/// A commit whose changed files to request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitRef {
+    pub owner: String,
+    pub repo: String,
+    pub sha: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +189,10 @@ pub enum DetailsEvent {
     Open(Link),
     /// The caller queues the request for this file's content.
     Fetch(BlobRef),
+    /// The caller queues the request for this commit's changed files.
+    FetchCommit(CommitRef),
+    /// The caller runs this review action.
+    Review(ReviewAction),
 }
 
 enum Content {
@@ -178,6 +210,8 @@ enum Content {
         prefix: bool,
         commits: Box<CommitsView>,
         files: Box<FilesState>,
+        /// The overlay's own command line, opened with `:` on the `Files Changed` tab.
+        command: Box<CommandLineState>,
     },
 }
 
@@ -208,47 +242,114 @@ impl DetailsDialog {
                     Panes::Conversation => &[],
                     Panes::Pull { commits, .. } => commits,
                 })),
-                files: Box::new(FilesState::new(match &content.panes {
-                    Panes::Conversation => &[],
-                    Panes::Pull { files, .. } => files,
-                })),
+                files: Box::new(match &content.panes {
+                    Panes::Conversation => FilesState::new(&[]),
+                    Panes::Pull { files, threads, .. } => FilesState::with_review(files, threads),
+                }),
                 content: Box::new(content),
                 scroll: 0,
                 focus: 0,
                 cursor: 0,
                 tab: DetailsTab::Conversation,
                 prefix: false,
+                command: Box::default(),
             },
             Err(e) => Content::Failed(e.to_string()),
         };
         self.take_request()
     }
 
-    /// Stores a file's content and returns the next file whose content is needed, if any.
+    /// Stores a file's content, routed by its commit id: the head commit's to the
+    /// `Files Changed` tab, any other to that commit's diff. Returns the next file whose
+    /// content is needed, if any.
     pub fn handle_blob(
         &mut self,
+        oid: &str,
         path: &str,
         result: Result<Blob, impl ToString>,
     ) -> Option<BlobRef> {
-        if let Content::Loaded { content, files, .. } = &mut self.content
-            && let Panes::Pull { files: changed, .. } = &content.panes
+        if let Content::Loaded {
+            content,
+            files,
+            commits,
+            ..
+        } = &mut self.content
+            && let Panes::Pull {
+                files: changed,
+                head_oid,
+                ..
+            } = &content.panes
         {
-            files.handle_blob(changed, path, result);
+            if oid == head_oid {
+                files.handle_blob(changed, path, result);
+            } else {
+                commits.handle_blob(oid, path, result);
+            }
+        }
+        self.take_request()
+    }
+
+    /// Stores a commit's file list and returns the first file whose content is needed,
+    /// if any.
+    pub fn handle_commit(
+        &mut self,
+        sha: &str,
+        result: Result<Vec<ChangedFile>, impl ToString>,
+    ) -> Option<BlobRef> {
+        if let Content::Loaded { commits, .. } = &mut self.content {
+            commits.handle_commit(sha, result);
         }
         self.take_request()
     }
 
     fn take_request(&mut self) -> Option<BlobRef> {
-        let Content::Loaded { content, files, .. } = &mut self.content else {
+        let Content::Loaded {
+            content,
+            files,
+            commits,
+            ..
+        } = &mut self.content
+        else {
             return None;
         };
-        let path = files.take_request()?;
-        blob_ref(&content.panes, path)
+        if let Some(path) = files.take_request() {
+            return blob_ref(&content.panes, path);
+        }
+        match commits.take_request() {
+            Some(CommitRequest::Blob { sha, path }) => commit_blob_ref(&content.panes, sha, path),
+            // A file-list request only arises from Enter, whose key path maps it itself.
+            Some(CommitRequest::Files { .. }) | None => None,
+        }
     }
 
     pub fn handle_key(&mut self, modifiers: KeyModifiers, code: KeyCode) -> DetailsEvent {
         let armed = matches!(self.content, Content::Loaded { prefix: true, .. });
-        if !armed && matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
+        // The overlay's own command line eats every key while open.
+        if let Content::Loaded {
+            tab: DetailsTab::Files,
+            command,
+            ..
+        } = &mut self.content
+            && let Some(outcome) = command.handle_key(modifiers, code)
+        {
+            return match outcome {
+                CommandLineOutcome::Submit(input) => self.run_review_command(&input),
+                CommandLineOutcome::Cancel | CommandLineOutcome::Consumed => DetailsEvent::Consumed,
+            };
+        }
+        // Esc and q reach a focused Files panel or an open commit diff first: they may
+        // only leave the widget's visual mode, the comment panel or the commit table;
+        // unconsumed they close below like everywhere else.
+        let widget_focused = matches!(
+            &self.content,
+            Content::Loaded { tab: DetailsTab::Files, files, .. }
+                if files.focus() != crate::view::dialog::files::Panel::Tree
+        ) || matches!(
+            &self.content,
+            Content::Loaded { tab: DetailsTab::Commits, commits, .. }
+                if commits.diff_open() && code == KeyCode::Esc
+        );
+        if !armed && !widget_focused && matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
             return DetailsEvent::Close;
         }
         let Content::Loaded {
@@ -260,6 +361,7 @@ impl DetailsDialog {
             prefix,
             commits,
             files,
+            command,
         } = &mut self.content
         else {
             return DetailsEvent::Consumed;
@@ -293,10 +395,37 @@ impl DetailsDialog {
             DetailsTab::Conversation => {}
             DetailsTab::Commits => {
                 commits.handle_key(modifiers, code);
-                return DetailsEvent::Consumed;
+                return match commits.take_request() {
+                    Some(CommitRequest::Files { sha }) => match &content.panes {
+                        Panes::Pull { owner, repo, .. } => DetailsEvent::FetchCommit(CommitRef {
+                            owner: owner.clone(),
+                            repo: repo.clone(),
+                            sha,
+                        }),
+                        Panes::Conversation => DetailsEvent::Consumed,
+                    },
+                    Some(CommitRequest::Blob { sha, path }) => {
+                        match commit_blob_ref(&content.panes, sha, path) {
+                            Some(blob) => DetailsEvent::Fetch(blob),
+                            None => DetailsEvent::Consumed,
+                        }
+                    }
+                    None => DetailsEvent::Consumed,
+                };
             }
             DetailsTab::Files => {
-                files.handle_key(changed, modifiers, code);
+                // `:` opens the overlay command line unless the comment editor is typing.
+                if (modifiers, code) == (KeyModifiers::NONE, KeyCode::Char(':'))
+                    && files.focus() != crate::view::dialog::files::Panel::Comment
+                {
+                    command.open();
+                    return DetailsEvent::Consumed;
+                }
+                if !files.handle_key(changed, modifiers, code)
+                    && matches!(code, KeyCode::Esc | KeyCode::Char('q'))
+                {
+                    return DetailsEvent::Close;
+                }
                 return match files
                     .take_request()
                     .and_then(|p| blob_ref(&content.panes, p))
@@ -325,6 +454,131 @@ impl DetailsDialog {
         DetailsEvent::Consumed
     }
 
+    /// Executes one submitted overlay command; unknown input becomes a status notice.
+    fn run_review_command(&mut self, input: &str) -> DetailsEvent {
+        let Content::Loaded { content, files, .. } = &mut self.content else {
+            return DetailsEvent::Consumed;
+        };
+        let Panes::Pull {
+            pull_id,
+            head_oid,
+            files: changed,
+            ..
+        } = &content.panes
+        else {
+            return DetailsEvent::Consumed;
+        };
+        let Some(review) = files.review_mut() else {
+            return DetailsEvent::Consumed;
+        };
+        let words: Vec<&str> = input.split_whitespace().collect();
+        match words.first().copied() {
+            None => DetailsEvent::Consumed,
+            Some("review") => {
+                if review.submitting {
+                    review.set_notice("review busy");
+                } else if review.active {
+                    review.set_notice("review already started");
+                } else {
+                    review.active = true;
+                    review.set_notice("review started");
+                }
+                DetailsEvent::Consumed
+            }
+            Some("submit") => {
+                let verdict = match words.get(1).copied() {
+                    Some("approve") => Some(Verdict::Approve),
+                    Some("changes") => Some(Verdict::RequestChanges),
+                    Some("comment") => Some(Verdict::Comment),
+                    _ => None,
+                };
+                let Some(verdict) = verdict else {
+                    review.set_notice("usage: submit approve|changes|comment [summary]");
+                    return DetailsEvent::Consumed;
+                };
+                if !review.active {
+                    review.set_notice("no review: run :review");
+                    return DetailsEvent::Consumed;
+                }
+                if review.submitting {
+                    review.set_notice("review busy");
+                    return DetailsEvent::Consumed;
+                }
+                review.save_editor();
+                let (threads, replies) = review.pending();
+                review.submitting = true;
+                review.set_notice("submitting review..");
+                let action = ReviewAction::Submit {
+                    pull_id: pull_id.clone(),
+                    head_oid: head_oid.clone(),
+                    review_id: review.review_id.clone(),
+                    threads,
+                    replies,
+                    verdict,
+                    body: words[2..].join(" "),
+                };
+                files.sync_marks_for(changed);
+                DetailsEvent::Review(action)
+            }
+            Some("discard") => {
+                if !review.active {
+                    review.set_notice("no review: run :review");
+                    return DetailsEvent::Consumed;
+                }
+                if review.submitting {
+                    review.set_notice("review busy");
+                    return DetailsEvent::Consumed;
+                }
+                review.clear_local();
+                review.active = false;
+                review.set_notice("review discarded");
+                let held = review.review_id.take();
+                files.sync_marks_for(changed);
+                match held {
+                    Some(review_id) => DetailsEvent::Review(ReviewAction::Discard { review_id }),
+                    None => DetailsEvent::Consumed,
+                }
+            }
+            Some(_) => {
+                review.set_notice(&format!("unknown command: {input}"));
+                DetailsEvent::Consumed
+            }
+        }
+    }
+
+    /// Applies a finished review request's outcome to the panel and the status line.
+    pub fn handle_review(&mut self, result: ReviewResult) {
+        let Content::Loaded { content, files, .. } = &mut self.content else {
+            return;
+        };
+        let changed: &[ChangedFile] = match &content.panes {
+            Panes::Conversation => &[],
+            Panes::Pull { files, .. } => files,
+        };
+        let Some(review) = files.review_mut() else {
+            return;
+        };
+        review.submitting = false;
+        match result.outcome {
+            Ok(ReviewOutcome::Submitted) => {
+                review.clear_local();
+                review.active = false;
+                review.review_id = None;
+                review.set_notice("review submitted");
+            }
+            // Discarding already ended review mode locally; a failure below only reports.
+            Ok(ReviewOutcome::Discarded) => {}
+            Err(error) => {
+                if review.active {
+                    review.review_id = result.review_id;
+                    review.drop_sent(result.added, result.replied);
+                }
+                review.set_notice(&format!("review failed: {error}"));
+            }
+        }
+        files.sync_marks_for(changed);
+    }
+
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
         let boxed = area.inner(INSET);
         Clear.render(boxed, buf);
@@ -347,8 +601,46 @@ impl DetailsDialog {
                 tab,
                 commits,
                 files,
+                command,
                 ..
             } => {
+                // The bottom row becomes the review status line while review mode is
+                // active or a notice stands.
+                let status = files
+                    .review()
+                    .map(|r| (r.active, r.notice().map(str::to_string)));
+                let inner = match &status {
+                    Some((active, notice)) if *active || notice.is_some() => {
+                        let [rest, line] =
+                            Layout::vertical([Constraint::Min(0), Constraint::Length(1)])
+                                .areas(inner);
+                        let mut x = line.x;
+                        if *active {
+                            let label = " REVIEW ";
+                            buf.set_stringn(
+                                x,
+                                line.y,
+                                label,
+                                line.width as usize,
+                                Style::default()
+                                    .fg(theme::TEMPLATE.text_hi)
+                                    .bg(theme::TEMPLATE.review),
+                            );
+                            x += label.len() as u16 + 1;
+                        }
+                        if let Some(notice) = notice {
+                            buf.set_stringn(
+                                x,
+                                line.y,
+                                notice,
+                                line.right().saturating_sub(x) as usize,
+                                theme::base(),
+                            );
+                        }
+                        rest
+                    }
+                    _ => inner,
+                };
                 let body = match &content.panes {
                     Panes::Conversation => inner,
                     Panes::Pull { .. } => {
@@ -375,6 +667,9 @@ impl DetailsDialog {
                     }
                     (Panes::Pull { files: changed, .. }, DetailsTab::Files) => {
                         files.render(changed, body, buf);
+                        if command.is_open() {
+                            render_command_panel(command, body, buf);
+                        }
                     }
                     _ => {
                         let [left, bar] =
@@ -476,6 +771,52 @@ fn markdown_rows(body: &str, width: u16) -> u16 {
 
 /// The boxes stacked top to bottom, each as tall as its entries, cut at the bottom; the focused
 /// box's cursor entry, when it opens something, on the highlight background.
+/// The overlay's own command line: a centered bordered panel over the `Files Changed`
+/// tab body; the widget draws its help box above the panel.
+fn render_command_panel(command: &mut CommandLineState, area: Rect, buf: &mut Buffer) {
+    let width = area.width.saturating_sub(8).clamp(20, 60).min(area.width);
+    // Borders, the widget's help box (its three entries plus its own borders) and the
+    // input row; the widget anchors the help directly above the input row, so a bottom
+    // input row keeps the help inside the panel.
+    let height = 8.min(area.height);
+    let panel = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    Clear.render(panel, buf);
+    let block = Block::bordered()
+        .style(theme::on_bg(theme::TEMPLATE.hi))
+        .title(" command ");
+    let inner = block.inner(panel);
+    block.render(panel, buf);
+    let input = Rect {
+        x: inner.x,
+        y: inner.bottom().saturating_sub(1),
+        width: inner.width,
+        height: inner.height.min(1),
+    };
+    let widget = CommandLineBuilder::default()
+        .style(theme::input_field_style())
+        .highlight_style(theme::on_bg(theme::TEMPLATE.hi))
+        .error_style(theme::on_bg(theme::TEMPLATE.error))
+        .help(vec![
+            ("review".to_string(), "start review mode".to_string()),
+            (
+                "submit approve|changes|comment [summary]".to_string(),
+                "submit the review".to_string(),
+            ),
+            (
+                "discard".to_string(),
+                "drop drafts and the review".to_string(),
+            ),
+        ])
+        .build()
+        .expect("CommandLineBuilder fields all default");
+    StatefulWidget::render(&widget, input, buf, command);
+}
+
 fn render_bar(boxes: &[SidebarBox], focus: usize, cursor: usize, area: Rect, buf: &mut Buffer) {
     let mut y = area.y;
     for (i, item) in boxes.iter().enumerate() {
@@ -659,20 +1000,10 @@ fn render_cards(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let author = content.author.as_deref().unwrap_or("ghost");
-    let description: Vec<Line<'static>> = vec![
-        Line::styled(content.title.clone(), theme::on_bg(theme::TEMPLATE.text_hi)),
-        Line::from(vec![
-            Span::styled(content.state, theme::on_bg(theme::TEMPLATE.hi)),
-            Span::raw("  by "),
-            Span::styled(format!("@{author}"), theme::on_bg(theme::TEMPLATE.text_hi)),
-        ]),
-        Line::raw(""),
-    ];
     let mut cards = vec![CardText {
         title: format!(" #{number} "),
         margin: CARD_MARGIN,
-        lines: description,
+        lines: vec![],
         body: content.body.clone(),
         color: theme::TEMPLATE.border,
     }];
@@ -1009,6 +1340,104 @@ mod tests {
     }
 
     #[test]
+    /// TU-R-078, TU-E-046, TU-E-049 — Enter on a commit row yields the commit files fetch with the repository coordinates; the arrived list yields the first file's content request at the commit's own id, and a content response routes by its commit id (the head commit's to the Files tab, the commit's to its diff); Esc inside the commit diff returns to the table without closing the overlay; `q` closes it.
+    fn ut_commit_diff_routing() {
+        let mut d = DetailsDialog::new(5, "Fix".into(), "Loading");
+        let mut c = content("body", vec![]);
+        c.panes = Panes::Pull {
+            commits: vec![Commit {
+                sha: "abc1234".into(),
+                headline: "Fix crash".into(),
+                author: CommitAuthor::User("octo".into()),
+                date: "2026-09-03T10:00:00Z".into(),
+            }],
+            files: vec![ChangedFile {
+                path: "src/main.rs".into(),
+                previous_path: None,
+                status: crate::github::files::FileStatus::Modified,
+                additions: 1,
+                deletions: 0,
+                patch: Some("@@ -1 +1,2 @@\n alpha\n+beta\n".into()),
+            }],
+            owner: "o".into(),
+            repo: "r".into(),
+            head_oid: "abc".into(),
+            pull_id: "PR_1".into(),
+            threads: vec![],
+        };
+        assert_eq!(
+            d.set_result(Ok::<_, String>(c)),
+            Some(BlobRef {
+                owner: "o".into(),
+                repo: "r".into(),
+                oid: "abc".into(),
+                path: "src/main.rs".into(),
+            })
+        );
+        d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('1'));
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Enter),
+            DetailsEvent::FetchCommit(CommitRef {
+                owner: "o".into(),
+                repo: "r".into(),
+                sha: "abc1234".into(),
+            })
+        );
+        assert_eq!(
+            d.handle_commit(
+                "abc1234",
+                Ok::<_, String>(vec![ChangedFile {
+                    path: "lib.rs".into(),
+                    previous_path: None,
+                    status: crate::github::files::FileStatus::Modified,
+                    additions: 1,
+                    deletions: 1,
+                    patch: Some("@@ -1 +1 @@\n-x\n+y\n".into()),
+                }])
+            ),
+            Some(BlobRef {
+                owner: "o".into(),
+                repo: "r".into(),
+                oid: "abc1234".into(),
+                path: "lib.rs".into(),
+            }),
+            "the first file's content is requested at the commit"
+        );
+        assert_eq!(
+            d.handle_blob(
+                "abc1234",
+                "lib.rs",
+                Ok::<_, String>(Blob::Text("y\n".into()))
+            ),
+            None
+        );
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            rows.iter()
+                .any(|r| r.contains(" Files ") && r.contains(" lib.rs ")),
+            "commit diff shown: {rows:?}"
+        );
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Esc),
+            DetailsEvent::Consumed,
+            "Esc returns to the table"
+        );
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("abc1234") && r.contains("Fix crash")),
+            "table is back: {rows:?}"
+        );
+        d.handle_key(KeyModifiers::NONE, KeyCode::Enter);
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('q')),
+            DetailsEvent::Close,
+            "q closes the overlay from the commit diff"
+        );
+    }
+
+    #[test]
     /// TU-R-072, TU-E-034 — a pull request overlay shows the vertical tab line at its left and Ctrl+T then j/k/digit switches its tab; an issue overlay shows none and Ctrl+T does nothing.
     fn ut_pull_tabs() {
         let ctrl_t =
@@ -1028,11 +1457,13 @@ mod tests {
                 status: crate::github::files::FileStatus::Modified,
                 additions: 1,
                 deletions: 0,
-                patch: Some("@@ -1 +1,2 @@\n a\n+b\n".into()),
+                patch: Some("@@ -1 +1,2 @@\n alpha\n+beta\n".into()),
             }],
             owner: "o".into(),
             repo: "r".into(),
             head_oid: "abc".into(),
+            pull_id: "PR_1".into(),
+            threads: vec![],
         };
         d.set_result(Ok::<_, String>(c));
         let buf = render_buffer(100, 40, |f| d.render(f.area(), f.buffer_mut()));
@@ -1074,24 +1505,27 @@ mod tests {
             "{rows:?}"
         );
         assert!(
-            rows.iter()
-                .any(|r| r.matches("Loading file..").count() == 2),
-            "{rows:?}"
+            rows.iter().any(|r| r.matches("alpha").count() == 2),
+            "patch shown while the content loads: {rows:?}"
         );
         assert_eq!(
-            d.handle_blob("src/main.rs", Ok::<_, String>(Blob::Text("a\nb\n".into()))),
+            d.handle_blob(
+                "abc",
+                "src/main.rs",
+                Ok::<_, String>(Blob::Text("alpha\nbeta\n".into()))
+            ),
             None,
             "nothing else to request"
         );
         let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
         assert!(
-            rows.iter().any(|r| r.matches("1  a").count() == 2)
-                && rows.iter().any(|r| r.contains("2 +b")),
+            rows.iter().any(|r| r.matches("alpha").count() == 2)
+                && rows.iter().any(|r| r.matches("beta").count() == 1),
             "{rows:?}"
         );
         d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
         assert!(
-            matches!(&d.content, Content::Loaded { focus: 0, files, .. } if files.focus() == crate::view::dialog::files::Panel::Old),
+            matches!(&d.content, Content::Loaded { focus: 0, files, .. } if files.focus() == crate::view::dialog::files::Panel::Diff),
             "Tab moves the panel focus, not the bar's"
         );
         ctrl_t(&mut d);
@@ -1157,6 +1591,8 @@ mod tests {
             owner: "o".into(),
             repo: "r".into(),
             head_oid: "abc".into(),
+            pull_id: "PR_1".into(),
+            threads: vec![],
         };
         d.set_result(Ok::<_, String>(c));
         d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
@@ -1516,6 +1952,200 @@ mod tests {
         assert_eq!(
             d.handle_key(KeyModifiers::NONE, KeyCode::Tab),
             DetailsEvent::Consumed
+        );
+    }
+
+    fn pull_dialog() -> DetailsDialog {
+        let mut d = DetailsDialog::new(5, "Fix".into(), "Loading");
+        let mut c = content("body", vec![]);
+        c.panes = Panes::Pull {
+            commits: vec![],
+            files: vec![ChangedFile {
+                path: "a.rs".into(),
+                previous_path: None,
+                status: crate::github::files::FileStatus::Modified,
+                additions: 1,
+                deletions: 0,
+                patch: Some("@@ -1,3 +1,3 @@\n fn main() {\n-    old();\n+    new();\n }\n".into()),
+            }],
+            owner: "o".into(),
+            repo: "r".into(),
+            head_oid: "abc".into(),
+            pull_id: "PR_1".into(),
+            threads: vec![],
+        };
+        d.set_result(Ok::<_, String>(c));
+        d
+    }
+
+    fn command(d: &mut DetailsDialog, text: &str) -> DetailsEvent {
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char(':')),
+            DetailsEvent::Consumed
+        );
+        for c in text.chars() {
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char(c));
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Enter)
+    }
+
+    /// The overlay's bottom inner row, where the review status line renders.
+    const STATUS_Y: u16 = 30 - INSET.vertical - 2;
+
+    fn status_row(d: &mut DetailsDialog) -> String {
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        rows[STATUS_Y as usize].clone()
+    }
+
+    #[test]
+    /// TU-R-079, TU-E-051, TU-E-056, TU-E-058 — `:` on the `Files Changed` tab opens the overlay's own centered bordered command line with the review help, Enter runs the trimmed input and Esc only closes; on another tab `:` does nothing; unknown input, a bad `submit` verdict and a second `review` each leave their notice on the bottom status line.
+    fn ut_review_command_line() {
+        let mut d = pull_dialog();
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char(':'));
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            !rows.iter().any(|r| r.contains(" command ")),
+            "no command line off the Files tab: {rows:?}"
+        );
+        d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('2'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char(':'));
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(rows.iter().any(|r| r.contains(" command ")), "{rows:?}");
+        assert!(
+            rows.iter().any(|r| r.contains("review"))
+                && rows
+                    .iter()
+                    .any(|r| r.contains("submit approve|changes|comment [summary]")),
+            "help shown: {rows:?}"
+        );
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Esc),
+            DetailsEvent::Consumed,
+            "Esc only closes the panel"
+        );
+        let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(!rows.iter().any(|r| r.contains(" command ")), "{rows:?}");
+
+        assert_eq!(command(&mut d, "zzz sub"), DetailsEvent::Consumed);
+        assert!(
+            status_row(&mut d).contains("unknown command: zzz sub"),
+            "{}",
+            status_row(&mut d)
+        );
+        assert_eq!(command(&mut d, "submit"), DetailsEvent::Consumed);
+        assert!(
+            status_row(&mut d).contains("usage: submit approve|changes|comment [summary]"),
+            "{}",
+            status_row(&mut d)
+        );
+        assert_eq!(command(&mut d, "review"), DetailsEvent::Consumed);
+        assert_eq!(command(&mut d, "review"), DetailsEvent::Consumed);
+        assert!(
+            status_row(&mut d).contains("review already started"),
+            "{}",
+            status_row(&mut d)
+        );
+    }
+
+    #[test]
+    /// TU-R-080, TU-R-084, TU-E-052, TU-E-054, TU-E-055, TU-E-057 — `review` activates review mode and the bottom row shows ` REVIEW ` on the purple background; `submit` with no drafts sends the verdict and summary alone and locks the review while it runs; a failed submit keeps review mode with the created review id, a successful one ends it; `discard` outside review mode notices, inside it drops the held review; `q` still closes the overlay.
+    fn ut_review_submit_and_discard() {
+        let mut d = pull_dialog();
+        d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('2'));
+        assert_eq!(command(&mut d, "discard"), DetailsEvent::Consumed);
+        assert!(
+            status_row(&mut d).contains("no review: run :review"),
+            "{}",
+            status_row(&mut d)
+        );
+        assert_eq!(command(&mut d, "review"), DetailsEvent::Consumed);
+        let buf = render_buffer(100, 30, |f| d.render(f.area(), f.buffer_mut()));
+        let rows = crate::testkit::buffer_rows(&buf);
+        let row = &rows[STATUS_Y as usize];
+        let x = row.find("REVIEW").expect("label") as u16;
+        assert_eq!(
+            buf[(x, STATUS_Y)].bg,
+            theme::TEMPLATE.review,
+            "purple label"
+        );
+        assert!(row.contains("review started"), "{row}");
+
+        assert_eq!(
+            command(&mut d, "submit comment  nice work"),
+            DetailsEvent::Review(ReviewAction::Submit {
+                pull_id: "PR_1".into(),
+                head_oid: "abc".into(),
+                review_id: None,
+                threads: vec![],
+                replies: vec![],
+                verdict: Verdict::Comment,
+                body: "nice work".into(),
+            })
+        );
+        assert!(
+            status_row(&mut d).contains("submitting review.."),
+            "{}",
+            status_row(&mut d)
+        );
+        assert_eq!(command(&mut d, "discard"), DetailsEvent::Consumed);
+        assert!(
+            status_row(&mut d).contains("review busy"),
+            "{}",
+            status_row(&mut d)
+        );
+        d.handle_review(ReviewResult {
+            review_id: Some("R_1".into()),
+            added: 0,
+            replied: 0,
+            outcome: Err(crate::github::GithubError::Status(502)),
+        });
+        let row = status_row(&mut d);
+        assert!(
+            row.contains("REVIEW") && row.contains("review failed: github: HTTP 502"),
+            "kept active: {row}"
+        );
+        assert_eq!(
+            command(&mut d, "discard"),
+            DetailsEvent::Review(ReviewAction::Discard {
+                review_id: "R_1".into(),
+            })
+        );
+        let row = status_row(&mut d);
+        assert!(
+            !row.contains("REVIEW") && row.contains("review discarded"),
+            "{row}"
+        );
+        d.handle_review(ReviewResult {
+            review_id: None,
+            added: 0,
+            replied: 0,
+            outcome: Ok(ReviewOutcome::Discarded),
+        });
+
+        assert_eq!(command(&mut d, "review"), DetailsEvent::Consumed);
+        assert!(matches!(
+            command(&mut d, "submit approve"),
+            DetailsEvent::Review(ReviewAction::Submit {
+                verdict: Verdict::Approve,
+                ..
+            })
+        ));
+        d.handle_review(ReviewResult {
+            review_id: None,
+            added: 0,
+            replied: 0,
+            outcome: Ok(ReviewOutcome::Submitted),
+        });
+        let row = status_row(&mut d);
+        assert!(
+            !row.contains("REVIEW") && row.contains("review submitted"),
+            "{row}"
+        );
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('q')),
+            DetailsEvent::Close
         );
     }
 }

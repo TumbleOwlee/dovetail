@@ -7,9 +7,11 @@ use tokio::sync::mpsc;
 use crate::app::{App, FetchRequest};
 use crate::atlassian::{self, AtlassianError, JiraProject};
 use crate::github::blob::Blob;
+use crate::github::files::ChangedFile;
 use crate::github::issue::Issue;
 use crate::github::pull::PullDetails;
 use crate::github::pulls::PullRequest;
+use crate::github::review::ReviewResult;
 use crate::github::{self, Board, GithubError, Project};
 
 /// Results other tasks send to the loop.
@@ -23,9 +25,17 @@ pub enum Message {
     PullRequest(Result<PullDetails, GithubError>),
     /// A file's content at a commit, for the open pull request overlay.
     Blob {
+        oid: String,
         path: String,
         result: Result<Blob, GithubError>,
     },
+    /// A commit's changed files, for the open pull request overlay's commit diff.
+    CommitFiles {
+        sha: String,
+        result: Result<Vec<ChangedFile>, GithubError>,
+    },
+    /// A review mutation's outcome, for the open pull request overlay.
+    Review(ReviewResult),
 }
 
 /// Performs one fetch and sends its outcome; a dropped receiver ends it silently.
@@ -68,8 +78,21 @@ pub async fn dispatch(request: FetchRequest, client: reqwest::Client, tx: mpsc::
             path,
         } => Message::Blob {
             result: github::blob::load_blob(&client, &token, &owner, &repo, &oid, &path).await,
+            oid,
             path,
         },
+        FetchRequest::Commit {
+            token,
+            owner,
+            repo,
+            sha,
+        } => Message::CommitFiles {
+            result: github::files::load_commit_files(&client, &token, &owner, &repo, &sha).await,
+            sha,
+        },
+        FetchRequest::Review { token, action } => {
+            Message::Review(github::review::run(&client, &token, action).await)
+        }
     };
     let _ = tx.send(message).await;
 }

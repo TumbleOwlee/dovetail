@@ -1,9 +1,9 @@
 //! The tab line and the read-only summary each tab shows.
 
-use ferrowl_ui::state::VerticalTabsState;
-use ferrowl_ui::widgets::VerticalTabsBuilder;
+use ferrowl_ui::state::TabBarState;
+use ferrowl_ui::widgets::TabBarBuilder;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Margin, Rect};
+use ratatui::layout::{Direction, Margin, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Paragraph, StatefulWidget, Widget};
@@ -99,16 +99,17 @@ pub fn render_tab_line(area: Rect, buf: &mut Buffer, active: Tab) {
 
 /// The captions stacked down `area` in the scheme's tab style, `active` selected.
 pub fn render_vertical_tabs(area: Rect, buf: &mut Buffer, titles: Vec<String>, active: usize) {
-    let mut state = VerticalTabsState {
+    let mut state = TabBarState {
         titles,
         active,
         offset: 0,
     };
-    let tabs = VerticalTabsBuilder::<String>::default()
-        .style(theme::scrolling_tabs_style())
+    let tabs = TabBarBuilder::<String>::default()
+        .style(theme::tab_bar_style())
         .padding(Margin::new(1, 1))
+        .direction(Direction::Vertical)
         .build()
-        .expect("VerticalTabsBuilder fields all default");
+        .expect("TabBarBuilder fields all default");
     StatefulWidget::render(&tabs, area, buf, &mut state);
 }
 
@@ -217,7 +218,7 @@ mod tests {
                 && crate::testkit::buffer_column(&buf, 2).is_empty(),
             "blank side columns"
         );
-        let style = theme::scrolling_tabs_style();
+        let style = theme::tab_bar_style();
         assert_eq!(
             buf[(1, board as u16)].fg,
             style.general.fg.expect("general fg")

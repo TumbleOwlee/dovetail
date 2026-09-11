@@ -1,144 +1,204 @@
-//! The `Files Changed` tab of the pull request overlay: file tree and the selected file's old
-//! and new state side by side.
+//! The `Files Changed` tab of the pull request overlay: file tree and the selected file's
+//! patch in the diff widget.
 
 use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use ferrowl_syntax::Language;
-use ferrowl_ui::Border;
-use ferrowl_ui::state::{CodeInputFieldState, CodeInputFieldStateBuilder};
-use ferrowl_ui::style::SyntaxThemeBuilder;
+use ferrowl_ui::state::{
+    DiffViewState, DiffViewStateBuilder, FileStatus as TreeStatus, FileTreeState,
+    FileTreeStateBuilder, Side,
+};
 use ferrowl_ui::traits::{HandleEvents, SetFocus};
-use ferrowl_ui::widgets::{CodeInputField, CodeInputFieldBuilder};
+use ferrowl_ui::widgets::{DiffViewBuilder, FileTreeBuilder};
+use ferrowl_ui::{Border, EventResult};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph, StatefulWidget, Widget};
 
-use crate::diff::{self, Cell};
 use crate::github::blob::Blob;
 use crate::github::files::{ChangedFile, FileStatus};
+use crate::github::pull::ReviewThread;
+use crate::view::dialog::review::{PanelEvent, ReviewPanel};
 use crate::view::theme;
 
 const TREE_WIDTH: u16 = 30;
-const LOADING: &str = "Loading file..";
 
-/// The focusable panels, in Tab order.
+/// The focusable panels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
     Tree,
-    Old,
-    New,
+    Diff,
+    /// The comment panel under the diff.
+    Comment,
 }
 
-/// One line of the file tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TreeRow {
-    pub depth: usize,
-    /// The directory name with a trailing `/`, or the file name.
-    pub name: String,
-    /// Index into the files for a file line, `None` for a directory line.
-    pub file: Option<usize>,
+/// The tree widget in the tab's style: bordered, titled `Files`.
+fn tree_widget() -> ferrowl_ui::widgets::FileTree {
+    FileTreeBuilder::default()
+        .border(Border::Full(Margin::new(1, 0)))
+        .title(Some(" Files ".into()))
+        .style(theme::input_field_style())
+        .syntax_theme(theme::status_theme())
+        .build()
+        .expect("FileTree fields all default")
 }
 
-/// The tree of the files sorted by path: a directory line before its entries.
-pub fn tree_rows(files: &[ChangedFile]) -> Vec<TreeRow> {
-    let mut order: Vec<usize> = (0..files.len()).collect();
-    order.sort_by(|a, b| files[*a].path.cmp(&files[*b].path));
-    let mut rows = Vec::new();
-    let mut open: Vec<&str> = Vec::new();
-    for index in order {
-        let mut parts: Vec<&str> = files[index].path.split('/').collect();
-        let name = parts.pop().unwrap_or_default();
-        let shared = open.iter().zip(&parts).take_while(|(a, b)| a == b).count();
-        open.truncate(shared);
-        for dir in &parts[shared..] {
-            rows.push(TreeRow {
-                depth: open.len(),
-                name: format!("{dir}/"),
-                file: None,
-            });
-            open.push(dir);
+/// The tree widget's status marker for a changed file; `None` where it has no marker.
+fn tree_status(status: FileStatus) -> Option<TreeStatus> {
+    match status {
+        FileStatus::Added => Some(TreeStatus::Added),
+        FileStatus::Removed => Some(TreeStatus::Removed),
+        FileStatus::Modified => Some(TreeStatus::Modified),
+        FileStatus::Renamed | FileStatus::Copied | FileStatus::Changed | FileStatus::Unchanged => {
+            None
         }
-        rows.push(TreeRow {
-            depth: open.len(),
-            name: name.to_string(),
-            file: Some(index),
-        });
     }
-    rows
 }
 
 /// What is known about a file's content at the head commit.
 enum Loaded {
     Loading,
-    Failed(String),
+    Failed,
     Blob(Blob),
 }
 
-/// What the two diff panels show for the selected file.
-enum Sides {
+/// What the diff panel shows for the selected file.
+enum Shown {
     /// No file is selected.
     Empty,
-    /// The same one-line notice on both sides.
-    Notice {
-        text: String,
-        error: bool,
-    },
-    Fields(Box<Fields>),
-}
-
-struct Fields {
-    old: CodeInputFieldState,
-    new: CodeInputFieldState,
+    /// A one-line notice instead of a diff.
+    Notice(String),
+    View(Box<DiffViewState>),
 }
 
 pub struct FilesState {
-    /// Index into the files of the selected one.
-    selected: usize,
+    tree: FileTreeState,
+    /// Index into the files of the one whose diff shows.
+    selected: Option<usize>,
     focus: Panel,
     /// Content by path, entered when its request is queued.
     blobs: HashMap<String, Loaded>,
-    sides: Sides,
+    shown: Shown,
     /// A path whose content the caller has yet to request.
     request: Option<String>,
-    /// Rows and text columns a diff side showed at the last draw; a page before that is one row.
-    view: (usize, usize),
+    /// Review threads and mode; `None` outside the pull request's own diff.
+    review: Option<ReviewPanel>,
 }
 
 impl FilesState {
-    /// The first file selected, the tree focused, that file's content requested.
+    /// Like [`FilesState::new`], with the pull request's review threads shown and review
+    /// mode available.
+    pub fn with_review(files: &[ChangedFile], threads: &[ReviewThread]) -> FilesState {
+        let mut state = FilesState::new(files);
+        state.review = Some(ReviewPanel::new(threads));
+        state.sync_marks_for(files);
+        state
+    }
+
+    /// The first file in tree order selected, the tree focused, that file's content
+    /// requested.
     pub fn new(files: &[ChangedFile]) -> FilesState {
-        let selected = tree_rows(files).iter().find_map(|r| r.file).unwrap_or(0);
+        let paths: Vec<(String, Option<TreeStatus>)> = files
+            .iter()
+            .map(|f| (f.path.clone(), tree_status(f.status)))
+            .collect();
+        let mut tree = FileTreeStateBuilder::default()
+            .paths(paths)
+            .build()
+            .expect("FileTreeState fields all default");
+        tree.set_focused(true);
+        // Before any render the tree's page is one row, so stepping the selection below
+        // would scroll the top rows out of view; a scratch render first sets a real
+        // visible height.
+        let area = Rect::new(0, 0, TREE_WIDTH, 128);
+        let mut scratch = Buffer::empty(area);
+        StatefulWidget::render(&tree_widget(), area, &mut scratch, &mut tree);
+        // The tree opens on its first row; step past leading directory rows so a file is
+        // selected. Every step descends one visible row, so the total path segment count
+        // bounds the walk.
+        let mut steps: usize = files.iter().map(|f| f.path.split('/').count()).sum();
+        while tree.selected_is_dir() == Some(true) && steps > 0 {
+            tree.handle_key(KeyModifiers::NONE, KeyCode::Down);
+            steps -= 1;
+        }
+        let selected = tree
+            .selected_path()
+            .and_then(|p| files.iter().position(|f| f.path == p));
         let mut state = FilesState {
+            tree,
             selected,
             focus: Panel::Tree,
             blobs: HashMap::new(),
-            sides: Sides::Empty,
+            shown: Shown::Empty,
             request: None,
-            view: (1, 0),
+            review: None,
         };
         state.refresh(files);
         state
     }
 
-    #[cfg(test)]
     pub fn focus(&self) -> Panel {
         self.focus
     }
 
-    #[cfg(test)]
-    pub fn selected(&self) -> usize {
-        self.selected
+    pub fn review(&self) -> Option<&ReviewPanel> {
+        self.review.as_ref()
     }
 
-    /// The active lines of the old and the new side, when both show a file.
-    #[cfg(test)]
-    pub fn active_lines(&self) -> Option<(usize, usize)> {
-        match &self.sides {
-            Sides::Fields(f) => Some((f.old.active_line(), f.new.active_line())),
-            _ => None,
+    pub fn review_mut(&mut self) -> Option<&mut ReviewPanel> {
+        self.review.as_mut()
+    }
+
+    /// The selected file's path.
+    fn path<'f>(&self, files: &'f [ChangedFile]) -> Option<&'f str> {
+        self.selected
+            .and_then(|i| files.get(i))
+            .map(|f| f.path.as_str())
+    }
+
+    /// The file lines the diff selection touches, per side.
+    fn touched(&self) -> (Vec<usize>, Vec<usize>) {
+        let Shown::View(state) = &self.shown else {
+            return (Vec::new(), Vec::new());
+        };
+        let Some(rows) = state.selected_rows() else {
+            return (Vec::new(), Vec::new());
+        };
+        let mut old = Vec::new();
+        let mut new = Vec::new();
+        for index in rows {
+            if let Some(info) = state.row(index) {
+                old.extend(info.old_line);
+                new.extend(info.new_line);
+            }
         }
+        (old, new)
+    }
+
+    /// Indices of the review threads the diff selection touches.
+    fn visible_threads(&self, files: &[ChangedFile]) -> Vec<usize> {
+        let (Some(review), Some(path)) = (&self.review, self.path(files)) else {
+            return Vec::new();
+        };
+        let (old, new) = self.touched();
+        review.visible(path, &old, &new)
+    }
+
+    /// Repaints the gutter marks of the shown diff from the review threads.
+    pub fn sync_marks_for(&mut self, files: &[ChangedFile]) {
+        let marks = match (&self.review, self.path(files)) {
+            (Some(review), Some(path)) => review.marks(path),
+            _ => return,
+        };
+        if let Shown::View(state) = &mut self.shown {
+            state.set_marked_ranges(marks);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn selected(&self) -> Option<usize> {
+        self.selected
     }
 
     /// The path whose content the caller must request, once.
@@ -158,235 +218,261 @@ impl FilesState {
         }
         let loaded = match result {
             Ok(blob) => Loaded::Blob(blob),
-            Err(e) => Loaded::Failed(e.to_string()),
+            Err(_) => Loaded::Failed,
         };
         self.blobs.insert(path.to_string(), loaded);
-        if files.get(self.selected).is_some_and(|f| f.path == path) {
+        if self
+            .selected
+            .and_then(|i| files.get(i))
+            .is_some_and(|f| f.path == path)
+        {
             self.refresh(files);
         }
     }
 
-    pub fn handle_key(&mut self, files: &[ChangedFile], modifiers: KeyModifiers, code: KeyCode) {
+    /// Routes one key; reports whether the tab consumed it, so an unconsumed Esc can
+    /// close the overlay.
+    pub fn handle_key(
+        &mut self,
+        files: &[ChangedFile],
+        modifiers: KeyModifiers,
+        code: KeyCode,
+    ) -> bool {
         match (code, self.focus) {
             (KeyCode::Tab, _) => {
-                self.set_focus(match self.focus {
-                    Panel::Tree => Panel::Old,
-                    Panel::Old => Panel::New,
-                    Panel::New => Panel::Tree,
-                });
+                self.cycle_focus(files, true);
+                true
             }
             (KeyCode::BackTab, _) => {
-                self.set_focus(match self.focus {
-                    Panel::Tree => Panel::New,
-                    Panel::Old => Panel::Tree,
-                    Panel::New => Panel::Old,
-                });
+                self.cycle_focus(files, false);
+                true
             }
-            (KeyCode::Char('j' | 'k'), Panel::Tree) => {
-                let order: Vec<usize> = tree_rows(files).iter().filter_map(|r| r.file).collect();
-                let Some(at) = order.iter().position(|i| *i == self.selected) else {
-                    return;
-                };
-                let at = if code == KeyCode::Char('j') {
-                    (at + 1).min(order.len() - 1)
-                } else {
-                    at.saturating_sub(1)
-                };
-                if order[at] != self.selected {
-                    self.selected = order[at];
-                    self.refresh(files);
+            (_, Panel::Tree) => match self.tree.handle_key(modifiers, code) {
+                Some(_) => {
+                    self.follow_tree(files);
+                    true
+                }
+                None => false,
+            },
+            (KeyCode::Char('c'), Panel::Diff)
+                if modifiers == KeyModifiers::NONE && self.review.is_some() =>
+            {
+                self.start_comment(files);
+                true
+            }
+            (KeyCode::Char('t'), Panel::Diff) if modifiers == KeyModifiers::NONE => {
+                match &mut self.shown {
+                    // The widget binds the layout toggle to Ctrl+T, which the overlay's
+                    // tab-switch chord consumes first; `t` stands in for it here.
+                    Shown::View(state) => {
+                        state.handle_events(KeyModifiers::CONTROL, KeyCode::Char('t'));
+                        true
+                    }
+                    _ => false,
                 }
             }
-            (_, Panel::Old | Panel::New) => {
-                let Sides::Fields(fields) = &mut self.sides else {
-                    return;
+            (_, Panel::Diff) => match &mut self.shown {
+                Shown::View(state) => {
+                    matches!(state.handle_events(modifiers, code), EventResult::Consumed)
+                }
+                _ => false,
+            },
+            (_, Panel::Comment) => {
+                let visible = self.visible_threads(files);
+                let Some(review) = &mut self.review else {
+                    return false;
                 };
-                let Fields { old, new } = fields.as_mut();
-                let (focused, other) = if self.focus == Panel::Old {
-                    (old, new)
-                } else {
-                    (new, old)
-                };
-                let (rows, columns) = self.view;
-                let last = focused.lines().len().saturating_sub(1);
-                let widest = focused
-                    .lines()
-                    .iter()
-                    .map(|l| l.chars().count())
-                    .max()
-                    .unwrap_or(0)
-                    .saturating_sub(1);
-                let active_len = focused
-                    .lines()
-                    .get(focused.active_line())
-                    .map_or(0, |l| l.chars().count());
-                let line_step: Option<isize> = match (modifiers, code) {
-                    (_, KeyCode::PageDown) => Some(rows as isize),
-                    (_, KeyCode::PageUp) => Some(-(rows as isize)),
-                    (KeyModifiers::CONTROL, KeyCode::Char('d')) => Some((rows / 2).max(1) as isize),
-                    (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
-                        Some(-((rows / 2).max(1) as isize))
+                match review.handle_key(&visible, modifiers, code) {
+                    PanelEvent::Consumed => {
+                        self.sync_marks_for(files);
+                        if !self.panel_shown(files) {
+                            self.set_focus(files, Panel::Diff);
+                        }
+                        true
                     }
-                    _ => None,
-                };
-                match (modifiers, code) {
-                    (_, KeyCode::Char('h') | KeyCode::Left) => {
-                        focused.set_h_scroll(focused.h_scroll().saturating_sub(1));
-                    }
-                    (_, KeyCode::Char('l') | KeyCode::Right) => {
-                        focused.set_h_scroll((focused.h_scroll() + 1).min(widest));
-                    }
-                    (_, KeyCode::Char('0')) => {
-                        focused.set_h_scroll(0);
-                    }
-                    (_, KeyCode::Char('$')) => {
-                        focused.set_h_scroll(active_len.saturating_sub(columns).min(widest));
-                    }
-                    (_, KeyCode::Char('g')) => {
-                        focused.set_active_line(0);
-                    }
-                    (_, KeyCode::Char('G')) => {
-                        focused.set_active_line(last);
-                    }
-                    _ if line_step.is_some() => {
-                        let step = line_step.unwrap_or(0);
-                        let line = (focused.active_line() as isize + step).clamp(0, last as isize);
-                        focused.set_active_line(line as usize);
-                    }
-                    _ => {
-                        let code = match code {
-                            KeyCode::Char('j') => KeyCode::Down,
-                            KeyCode::Char('k') => KeyCode::Up,
-                            other => other,
-                        };
-                        focused.handle_events(modifiers, code);
+                    PanelEvent::ToDiff => {
+                        if code == KeyCode::Esc {
+                            self.set_focus(files, Panel::Diff);
+                            true
+                        } else {
+                            false
+                        }
                     }
                 }
-                // No cursor is drawn on a read-only side, so the column only serves the
-                // field's follow-the-cursor logic: parked on the scroll it keeps the view put.
-                focused.set_cursor_col(focused.h_scroll());
-                other.set_active_line(focused.active_line());
-                other.set_cursor_col(focused.cursor_col());
             }
-            _ => {}
         }
     }
 
-    fn set_focus(&mut self, focus: Panel) {
-        self.focus = focus;
-        if let Sides::Fields(f) = &mut self.sides {
-            f.old.set_focused(focus == Panel::Old);
-            f.new.set_focused(focus == Panel::New);
-        }
+    /// Whether the comment panel takes rows under the diff.
+    fn panel_shown(&self, files: &[ChangedFile]) -> bool {
+        let visible = self.visible_threads(files);
+        self.review
+            .as_ref()
+            .is_some_and(|r| r.panel_shown(&visible))
     }
 
-    /// Rebuilds the diff sides for the selected file, queueing its content request the first time.
-    fn refresh(&mut self, files: &[ChangedFile]) {
-        let Some(file) = files.get(self.selected) else {
-            self.sides = Sides::Empty;
+    /// Moves the focus tree → diff → comment panel → tree, the comment stop only while
+    /// its panel is shown.
+    fn cycle_focus(&mut self, files: &[ChangedFile], forward: bool) {
+        let comment = self.panel_shown(files);
+        let next = match (self.focus, forward) {
+            (Panel::Tree, true) => Panel::Diff,
+            (Panel::Diff, true) if comment => Panel::Comment,
+            (Panel::Diff, true) | (Panel::Comment, true) => Panel::Tree,
+            (Panel::Tree, false) if comment => Panel::Comment,
+            (Panel::Tree, false) => Panel::Diff,
+            (Panel::Diff, false) => Panel::Tree,
+            (Panel::Comment, false) => Panel::Diff,
+        };
+        self.set_focus(files, next);
+    }
+
+    /// Opens a new draft comment on the diff selection of the focused side; consumed
+    /// with a notice when review mode or a line is missing.
+    fn start_comment(&mut self, files: &[ChangedFile]) {
+        let path = self.path(files).map(str::to_string);
+        let (old, new) = self.touched();
+        let Some(review) = &mut self.review else {
             return;
         };
-        let notice = |text: &str, error: bool| Sides::Notice {
-            text: text.to_string(),
-            error,
+        if !review.active {
+            review.set_notice("no review: run :review");
+            return;
+        }
+        if review.submitting {
+            review.set_notice("review busy");
+            return;
+        }
+        let Shown::View(state) = &mut self.shown else {
+            review.set_notice("no line to comment");
+            return;
+        };
+        let side = state.focused_side();
+        let lines = match side {
+            Side::Old => old,
+            Side::New => new,
+        };
+        let (Some(first), Some(last), Some(path)) = (lines.iter().min(), lines.iter().max(), path)
+        else {
+            review.set_notice("no line to comment");
+            return;
+        };
+        state.handle_events(KeyModifiers::NONE, KeyCode::Esc);
+        review.open_draft(&path, side, *first..=*last);
+        self.set_focus(files, Panel::Comment);
+        self.sync_marks_for(files);
+    }
+
+    /// Shows the diff of the file the tree selection came to rest on; a directory row
+    /// keeps the shown diff.
+    fn follow_tree(&mut self, files: &[ChangedFile]) {
+        if self.tree.selected_is_dir() != Some(false) {
+            return;
+        }
+        let index = self
+            .tree
+            .selected_path()
+            .and_then(|p| files.iter().position(|f| f.path == p));
+        if index.is_some() && index != self.selected {
+            self.selected = index;
+            self.refresh(files);
+        }
+    }
+
+    fn set_focus(&mut self, files: &[ChangedFile], focus: Panel) {
+        let visible = self.visible_threads(files);
+        self.focus = focus;
+        self.tree.set_focused(focus == Panel::Tree);
+        if let Shown::View(state) = &mut self.shown {
+            state.set_focused(focus == Panel::Diff);
+        }
+        if let Some(review) = &mut self.review {
+            review.set_focused(focus == Panel::Comment, &visible);
+        }
+        self.sync_marks_for(files);
+    }
+
+    /// Rebuilds the diff panel for the selected file, queueing its content request the
+    /// first time.
+    fn refresh(&mut self, files: &[ChangedFile]) {
+        let Some(file) = self.selected.and_then(|i| files.get(i)) else {
+            self.shown = Shown::Empty;
+            return;
         };
         let Some(patch) = file.patch.as_deref() else {
-            self.sides = notice("No diff available", false);
+            self.shown = Shown::Notice("No diff available".to_string());
             return;
         };
-        if file.status == FileStatus::Removed {
-            self.sides = self.fields(diff::split_file("", patch));
-            return;
+        if file.status != FileStatus::Removed && !self.blobs.contains_key(&file.path) {
+            self.blobs.insert(file.path.clone(), Loaded::Loading);
+            self.request = Some(file.path.clone());
         }
-        self.sides = match self.blobs.get(&file.path) {
-            None => {
-                self.blobs.insert(file.path.clone(), Loaded::Loading);
-                self.request = Some(file.path.clone());
-                notice(LOADING, false)
-            }
-            Some(Loaded::Loading) => notice(LOADING, false),
-            Some(Loaded::Failed(message)) => notice(message, true),
-            Some(Loaded::Blob(Blob::Binary)) => notice("Binary file", false),
-            Some(Loaded::Blob(Blob::TooLarge)) => notice("File too large", false),
-            Some(Loaded::Blob(Blob::Text(text))) => self.fields(diff::split_file(text, patch)),
+        let mut state = match self.blobs.get(&file.path) {
+            Some(Loaded::Blob(Blob::Text(text))) => DiffViewStateBuilder::default()
+                .build_with_diff_and_file(patch, text)
+                .expect("DiffViewState fields all default"),
+            _ => DiffViewStateBuilder::default()
+                .build_with_diff(patch)
+                .expect("DiffViewState fields all default"),
         };
-    }
-
-    fn fields(&self, split: diff::Split) -> Sides {
-        Sides::Fields(Box::new(Fields {
-            old: field(&split.old, self.focus == Panel::Old),
-            new: field(&split.new, self.focus == Panel::New),
-        }))
+        state.set_focused(self.focus == Panel::Diff);
+        self.shown = Shown::View(Box::new(state));
+        self.sync_marks_for(files);
     }
 
     pub fn render(&mut self, files: &[ChangedFile], area: Rect, buf: &mut Buffer) {
-        let [tree, diff] =
+        let [tree, right] =
             Layout::horizontal([Constraint::Length(TREE_WIDTH), Constraint::Min(0)]).areas(area);
-        let [old_area, new_area] =
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Min(0)]).areas(diff);
-        self.render_tree(files, tree, buf);
-        let selected = files.get(self.selected);
-        let old_title = selected.map_or(String::new(), |f| {
-            f.previous_path.clone().unwrap_or_else(|| f.path.clone())
-        });
-        let new_title = selected.map_or(String::new(), |f| f.path.clone());
-        match &mut self.sides {
-            Sides::Empty => {
-                self.panel(Panel::Old, &old_title).render(old_area, buf);
-                self.panel(Panel::New, &new_title).render(new_area, buf);
+        StatefulWidget::render(&tree_widget(), tree, buf, &mut self.tree);
+        let visible = self.visible_threads(files);
+        let panel = self
+            .review
+            .as_ref()
+            .is_some_and(|r| r.panel_shown(&visible));
+        let (diff, comment) = if panel {
+            let height = (area.height / 3).clamp(3, 12);
+            let [diff, comment] =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(height)]).areas(right);
+            (diff, Some(comment))
+        } else {
+            (right, None)
+        };
+        let title = self
+            .selected
+            .and_then(|i| files.get(i))
+            .map_or(String::new(), |f| {
+                f.previous_path
+                    .as_deref()
+                    .map_or_else(|| f.path.clone(), |p| format!("{p} → {}", f.path))
+            });
+        match &mut self.shown {
+            Shown::Empty => {
+                self.panel(&title).render(diff, buf);
             }
-            Sides::Notice { text, error } => {
-                let color = if *error {
-                    theme::TEMPLATE.error
-                } else {
-                    theme::TEMPLATE.placeholder
-                };
-                let line = Line::styled(text.clone(), theme::on_bg(color));
-                for (panel, title, area) in [
-                    (Panel::Old, &old_title, old_area),
-                    (Panel::New, &new_title, new_area),
-                ] {
-                    let block = self.panel(panel, title);
-                    let inner = block.inner(area).inner(Margin::new(1, 0));
-                    block.render(area, buf);
-                    Paragraph::new(line.clone())
-                        .style(theme::base())
-                        .render(inner, buf);
-                }
+            Shown::Notice(text) => {
+                let line = Line::styled(text.clone(), theme::on_bg(theme::TEMPLATE.placeholder));
+                let block = self.panel(&title);
+                let inner = block.inner(diff).inner(Margin::new(1, 0));
+                block.render(diff, buf);
+                Paragraph::new(line).style(theme::base()).render(inner, buf);
             }
-            Sides::Fields(fields) => {
-                let Fields { old, new } = fields.as_mut();
-                let old_widget = code_field(&old_title);
-                let new_widget = code_field(&new_title);
-                let gutter = old
-                    .gutter_labels()
-                    .iter()
-                    .flatten()
-                    .map(|l| l.chars().count())
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
-                self.view = (
-                    old_area.height.saturating_sub(2).max(1) as usize,
-                    (old_area.width.saturating_sub(4) as usize).saturating_sub(gutter),
-                );
-                // The focused side settles its scroll while rendering; the other side then
-                // mirrors it so the same row faces on both sides.
-                if self.focus == Panel::New {
-                    StatefulWidget::render(&new_widget, new_area, buf, new);
-                    mirror(new, old);
-                    StatefulWidget::render(&old_widget, old_area, buf, old);
-                } else {
-                    StatefulWidget::render(&old_widget, old_area, buf, old);
-                    mirror(old, new);
-                    StatefulWidget::render(&new_widget, new_area, buf, new);
-                }
+            Shown::View(state) => {
+                let widget = DiffViewBuilder::default()
+                    .border(Border::Full(Margin::new(1, 0)))
+                    .title(Some(format!(" {title} ").into()))
+                    .style(theme::diff_view_style())
+                    .build()
+                    .expect("DiffView fields all default");
+                StatefulWidget::render(&widget, diff, buf, state.as_mut());
             }
+        }
+        if let (Some(review), Some(comment)) = (&mut self.review, comment) {
+            review.render(&visible, self.focus == Panel::Comment, comment, buf);
         }
     }
 
-    fn panel(&self, panel: Panel, title: &str) -> Block<'static> {
-        let color = if self.focus == panel {
+    fn panel(&self, title: &str) -> Block<'static> {
+        let color = if self.focus == Panel::Diff {
             theme::TEMPLATE.hi
         } else {
             theme::TEMPLATE.border
@@ -395,102 +481,12 @@ impl FilesState {
             .style(theme::on_bg(color))
             .title(format!(" {title} "))
     }
-
-    fn render_tree(&self, files: &[ChangedFile], area: Rect, buf: &mut Buffer) {
-        let block = self.panel(Panel::Tree, "Files");
-        let inner = block.inner(area).inner(Margin::new(1, 0));
-        block.render(area, buf);
-        let rows = tree_rows(files);
-        if rows.is_empty() {
-            Paragraph::new(Line::styled(
-                "None",
-                theme::on_bg(theme::TEMPLATE.placeholder),
-            ))
-            .style(theme::base())
-            .render(inner, buf);
-            return;
-        }
-        let at = rows
-            .iter()
-            .position(|r| r.file == Some(self.selected))
-            .unwrap_or(0);
-        let offset = at.saturating_sub((inner.height as usize).saturating_sub(1));
-        let lines: Vec<Line<'static>> = rows
-            .into_iter()
-            .skip(offset)
-            .map(|row| {
-                let color = match row.file.map(|i| files[i].status) {
-                    Some(FileStatus::Added) => theme::TEMPLATE.success,
-                    Some(FileStatus::Removed) => theme::TEMPLATE.error,
-                    _ => theme::TEMPLATE.text,
-                };
-                let line = Line::styled(
-                    format!("{}{}", "  ".repeat(row.depth), row.name),
-                    theme::on_bg(color),
-                );
-                if row.file == Some(self.selected) {
-                    theme::highlighted(line)
-                } else {
-                    line
-                }
-            })
-            .collect();
-        Paragraph::new(lines)
-            .style(theme::base())
-            .render(inner, buf);
-    }
-}
-
-/// A read-only diff field holding the cells, the active line at the top.
-fn field(cells: &[Cell], focused: bool) -> CodeInputFieldState {
-    let labels: Vec<String> = if cells.is_empty() {
-        vec![String::new()]
-    } else {
-        cells
-            .iter()
-            .map(|c| c.number.map_or_else(String::new, |n| n.to_string()))
-            .collect()
-    };
-    let text: Vec<&str> = cells.iter().map(|c| c.text.as_str()).collect();
-    let mut state = CodeInputFieldStateBuilder::default()
-        .vim(false)
-        .disabled(true)
-        .focused(focused)
-        .language(Some(Language::Diff))
-        .gutter_labels(Some(labels))
-        .build()
-        .expect("CodeInputFieldState fields all default");
-    state.set_content(&text.join("\n"));
-    state.set_active_line(0);
-    state.set_cursor_col(0);
-    state
-}
-
-fn code_field(title: &str) -> CodeInputField {
-    let theme = SyntaxThemeBuilder::default()
-        .added(theme::on_bg(theme::TEMPLATE.success))
-        .removed(theme::on_bg(theme::TEMPLATE.error))
-        .meta(theme::on_bg(theme::TEMPLATE.placeholder))
-        .build()
-        .expect("SyntaxTheme fields all default");
-    CodeInputFieldBuilder::default()
-        .border(Border::Full(Margin::new(1, 0)))
-        .title(Some(title.into()))
-        .style(theme::input_field_style())
-        .syntax_theme(theme)
-        .build()
-        .expect("CodeInputField fields all default")
-}
-
-fn mirror(from: &CodeInputFieldState, to: &mut CodeInputFieldState) {
-    to.set_active_line(from.active_line());
-    to.set_cursor_col(from.cursor_col());
-    to.set_scroll_offset(from.scroll_offset());
-    to.set_h_scroll(from.h_scroll());
 }
 
 #[cfg(test)]
 mod tests {
+    use ferrowl_ui::COLOR_SCHEME;
+
     use super::*;
     use crate::github::files::FileStatus;
     use crate::testkit::{buffer_rows, render_buffer};
@@ -555,388 +551,335 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-074 — files sort by path, a directory line precedes its entries, depth follows the path.
-    fn ut_tree_rows() {
-        let row = |depth, name: &str, file| TreeRow {
-            depth,
-            name: name.into(),
-            file,
-        };
-        assert_eq!(
-            tree_rows(&files()),
-            vec![
-                row(0, "README.md", Some(1)),
-                row(0, "docs/", None),
-                row(1, "new.md", Some(2)),
-                row(0, "src/", None),
-                row(1, "main.rs", Some(0)),
-                row(1, "view/", None),
-                row(2, "a.rs", Some(3)),
-            ]
-        );
-        assert!(tree_rows(&[]).is_empty());
-    }
-
-    #[test]
-    /// TU-R-074, TU-R-075, TU-R-076, TU-E-031, TU-E-037 — three titled panels, the tree focused and its first file selected and requested; the sides read `Loading file..` until the content arrives, then show the whole file with markers, gutter numbers, colors and filler rows; j/k move over files only, requesting each once; a file without a patch reads `No diff available` and a removed file needs no request; Tab cycles the focus.
-    fn ut_keys_and_panels() {
+    /// TU-R-074, TU-R-076, TU-E-031, TU-E-037 — the tree widget at the left with the files in sorted path order, status markers and colors, the selected row highlighted; the diff widget at the right shows the selected file's patch immediately, hunk-only, added rows on the widget's added band, a filler side blank; the selection moving over the tree follows onto files, a directory row keeping the shown diff; each file's content is requested once; a file without a patch reads `No diff available`; a renamed file titles the panel `old → new`; a removed file requests nothing and keeps its patch view.
+    fn ut_tree_and_diff_panel() {
         let files = files();
         let mut s = FilesState::new(&files);
-        assert_eq!((s.focus(), s.selected()), (Panel::Tree, 1));
-        assert_eq!(s.take_request().as_deref(), Some("README.md"));
-        assert_eq!(s.take_request(), None, "requested once");
+        assert_eq!((s.focus(), s.selected()), (Panel::Tree, Some(2)));
+        assert_eq!(s.take_request(), None, "no patch, no request");
         let (rows, buf) = draw(&mut s, &files, 12);
         assert!(
-            rows[0].contains(" Files ") && rows[0].matches(" README.md ").count() == 2,
+            rows[0].contains(" Files ") && rows[0].contains(" docs/old.md → docs/new.md "),
             "{rows:?}"
         );
         assert!(
-            rows[1].contains("README.md")
-                && rows[2].contains("docs/")
-                && rows[3].contains("  new.md"),
-            "{rows:?}"
+            rows[1].contains("docs")
+                && rows[2].contains("new.md")
+                && rows[3].contains("src")
+                && rows[7].contains("README.md"),
+            "directories before files: {rows:?}"
         );
+        assert_eq!(count(&rows, "No diff available"), 1, "{rows:?}");
+        let (x, y) = cell(&buf, "new.md");
+        assert_eq!(buf[(x, y)].bg, theme::TEMPLATE.hi_bg, "selected row");
         let (x, y) = cell(&buf, "README.md");
-        assert_eq!(buf[(x, y)].bg, theme::TEMPLATE.hi_bg, "selected file");
-        assert_eq!(buf[(x, y + 1)].fg, theme::TEMPLATE.text, "directory");
+        assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.success, "added file");
         let (x, y) = cell(&buf, "a.rs");
         assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.error, "removed file");
-        assert_eq!(buf[(0, 0)].fg, theme::TEMPLATE.hi, "tree border focused");
-        assert_eq!(count(&rows, LOADING), 2, "{rows:?}");
-        let (x, y) = cell(&buf, LOADING);
-        assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.placeholder);
+        let (x, y) = cell(&buf, "main.rs");
+        assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.text, "modified file");
 
-        s.handle_blob(&files, "README.md", text("# Title\n"));
-        let (rows, buf) = draw(&mut s, &files, 12);
-        assert_eq!(count(&rows, "1 +# Title"), 1, "{rows:?}");
-        let (x, y) = cell(&buf, "+# Title");
-        assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.success);
-        let old_inner = &rows[y as usize][TREE_WIDTH as usize..65];
-        assert!(
-            old_inner.trim_matches(['│', ' ']).is_empty(),
-            "filler row blank: {old_inner:?}"
-        );
-
+        assert!(s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j')));
         s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
-        assert_eq!(s.selected(), 2, "skips the directory line");
-        assert_eq!(s.take_request(), None);
+        assert_eq!(s.selected(), Some(2), "directory rows keep the diff");
         let (rows, _) = draw(&mut s, &files, 12);
-        assert!(
-            rows[0].contains(" docs/old.md ") && rows[0].contains(" docs/new.md "),
-            "{rows:?}"
-        );
-        assert_eq!(count(&rows, "No diff available"), 2, "{rows:?}");
+        assert!(rows[0].contains(" docs/old.md → docs/new.md "), "{rows:?}");
 
         s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
-        assert_eq!(s.selected(), 0);
-        assert_eq!(s.take_request().as_deref(), Some("src/main.rs"));
-        s.handle_blob(&files, "src/main.rs", text("fn main() {\n    new();\n}\n"));
-        let (rows, buf) = draw(&mut s, &files, 12);
-        assert_eq!(count(&rows, "1  fn main() {"), 2, "{rows:?}");
-        assert!(
-            rows.iter()
-                .any(|r| r.contains("2 -    old();") && r.contains("2 +    new();")),
-            "{rows:?}"
+        assert_eq!(
+            s.selected(),
+            Some(3),
+            "past the src and view directory rows"
         );
-        assert_eq!(count(&rows, "3  }"), 2, "{rows:?}");
-        let (x, y) = cell(&buf, "-    old();");
-        assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.error);
-        let (x, y) = cell(&buf, "+    new();");
-        assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.success);
-        let (x, y) = cell(&buf, " fn main() {");
-        assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.text);
-
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
-        assert_eq!(s.selected(), 3, "clamped at the last file");
         assert_eq!(s.take_request(), None, "a removed file needs no content");
         let (rows, buf) = draw(&mut s, &files, 12);
-        assert_eq!(count(&rows, "1 -gone"), 1, "{rows:?}");
-        let (x, y) = cell(&buf, "-gone");
-        assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.error);
+        assert_eq!(count(&rows, "gone"), 1, "{rows:?}");
+        let (x, y) = cell(&buf, "gone");
+        assert_eq!(buf[(x, y)].bg, COLOR_SCHEME.diff_removed);
+
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        assert_eq!(s.selected(), Some(0));
+        assert_eq!(s.take_request().as_deref(), Some("src/main.rs"));
+        assert_eq!(s.take_request(), None, "requested once");
+        let (rows, buf) = draw(&mut s, &files, 12);
+        assert_eq!(count(&rows, "fn main() {"), 2, "both panes: {rows:?}");
         assert!(
-            rows[y as usize][65..].trim_matches(['│', ' ']).is_empty(),
-            "new side blank: {rows:?}"
+            rows.iter()
+                .any(|r| r.matches("old();").count() == 1 && r.matches("new();").count() == 1),
+            "changed row pairs: {rows:?}"
         );
+        let (x, y) = cell(&buf, "old();");
+        assert_eq!(
+            buf[(x, y)].bg,
+            COLOR_SCHEME.diff_removed_word,
+            "changed word emphasized"
+        );
+        assert_eq!(
+            buf[(x - 1, y)].bg,
+            COLOR_SCHEME.diff_removed,
+            "removed band"
+        );
+        let (x, y) = cell(&buf, "new();");
+        assert_eq!(buf[(x, y)].bg, COLOR_SCHEME.diff_added_word);
+        assert_eq!(buf[(x - 1, y)].bg, COLOR_SCHEME.diff_added);
+
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        assert_eq!(s.selected(), Some(1));
+        assert_eq!(s.take_request().as_deref(), Some("README.md"));
+        let (rows, buf) = draw(&mut s, &files, 12);
+        assert_eq!(count(&rows, "# Title"), 1, "patch shown while loading");
+        let (x, y) = cell(&buf, "# Title");
+        assert_eq!(buf[(x, y)].bg, COLOR_SCHEME.diff_added, "added band");
+        let old_inner = &rows[y as usize][(TREE_WIDTH as usize) + 1..64];
+        assert!(
+            old_inner.trim_matches(['│', ' ']).is_empty(),
+            "filler side blank: {old_inner:?}"
+        );
+        s.handle_blob(&files, "README.md", text("# Title\n"));
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert_eq!(count(&rows, "# Title"), 1, "{rows:?}");
 
         for _ in 0..10 {
             s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('k'));
         }
-        assert_eq!(s.selected(), 1, "clamped at the first file");
-        assert_eq!(s.take_request(), None, "README.md was requested before");
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
-        assert_eq!(s.focus(), Panel::Old);
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
-        assert_eq!(s.focus(), Panel::New);
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
-        assert_eq!(s.focus(), Panel::Tree);
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab);
-        assert_eq!(s.focus(), Panel::New);
+        assert_eq!(s.selected(), Some(2), "the last file passed on the way up");
+        assert_eq!(s.take_request(), None, "nothing new to request");
+    }
+
+    #[test]
+    /// TU-R-075, TU-E-040, TU-E-046 — Tab and Shift+Tab toggle the focus between the tree and the diff panel, the focused borders in the highlight color; keys on the focused diff panel go to the widget (`j` consumed); Esc is consumed only to leave the widget's visual mode; on a notice panel navigation keys are not consumed but the border still shows the focus.
+    fn ut_focus_keys_and_esc() {
+        let files = files();
+        let mut s = FilesState::new(&files);
+        for _ in 0..4 {
+            s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        }
+        assert_eq!(s.selected(), Some(0));
+        s.take_request();
+        s.handle_blob(&files, "src/main.rs", text("fn main() {\n    new();\n}\n"));
         let (_, buf) = draw(&mut s, &files, 12);
-        assert_eq!(
-            buf[(0, 0)].fg,
-            theme::TEMPLATE.border,
-            "tree border unfocused"
-        );
-        assert_eq!(buf[(99, 0)].fg, theme::TEMPLATE.hi, "new side focused");
+        assert_eq!(buf[(0, 0)].fg, theme::TEMPLATE.hi, "tree border focused");
         assert_eq!(
             buf[(TREE_WIDTH, 0)].fg,
             theme::TEMPLATE.border,
-            "old side unfocused"
+            "diff border unfocused"
         );
-    }
+        assert!(s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab));
+        assert_eq!(s.focus(), Panel::Diff);
+        let (_, buf) = draw(&mut s, &files, 12);
+        assert_eq!(buf[(0, 0)].fg, theme::TEMPLATE.border, "tree unfocused");
+        assert_eq!(buf[(TREE_WIDTH, 0)].fg, theme::TEMPLATE.hi, "diff focused");
+        assert_eq!(buf[(99, 0)].fg, theme::TEMPLATE.hi, "both pane borders");
+        assert!(s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab));
+        assert_eq!(s.focus(), Panel::Tree);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
 
-    #[test]
-    /// TU-R-075 — on a focused diff side j and k move its active line and the other side mirrors it; the scroll offset is mirrored too so the same row faces on both sides; the selection stays.
-    fn ut_side_navigation_mirrors() {
-        let files = files();
-        let mut s = FilesState::new(&files);
-        s.take_request();
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
-        assert_eq!(s.take_request().as_deref(), Some("src/main.rs"));
-        s.handle_blob(&files, "src/main.rs", text("fn main() {\n    new();\n}\n"));
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab);
-        assert_eq!(s.focus(), Panel::New);
-        assert_eq!(s.active_lines(), Some((0, 0)));
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
-        assert_eq!(s.active_lines(), Some((1, 1)));
-        assert_eq!(s.selected(), 0, "selection untouched");
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Down);
-        assert_eq!(s.active_lines(), Some((2, 2)));
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
-        assert_eq!(s.active_lines(), Some((2, 2)), "never past the last row");
-        let (rows, _) = draw(&mut s, &files, 4);
-        assert_eq!(count(&rows, "fn main() {"), 0, "scrolled both: {rows:?}");
         assert!(
-            rows.iter()
-                .any(|r| r.contains("-    old();") && r.contains("+    new();")),
-            "{rows:?}"
+            s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j')),
+            "widget consumes j"
         );
-        assert_eq!(count(&rows, "3  }"), 2, "{rows:?}");
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('k'));
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('k'));
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Up);
-        assert_eq!(s.active_lines(), Some((0, 0)));
-        let (rows, _) = draw(&mut s, &files, 4);
+        assert!(
+            !s.handle_key(&files, KeyModifiers::NONE, KeyCode::Esc),
+            "Esc unconsumed outside visual mode"
+        );
+        assert!(s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('v')));
+        assert!(
+            s.handle_key(&files, KeyModifiers::NONE, KeyCode::Esc),
+            "Esc leaves visual mode"
+        );
+        assert!(!s.handle_key(&files, KeyModifiers::NONE, KeyCode::Esc));
+
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        for _ in 0..4 {
+            s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('k'));
+        }
+        assert_eq!(s.selected(), Some(2), "back on the tree");
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        assert!(
+            !s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j')),
+            "notice panel consumes nothing"
+        );
+        let (_, buf) = draw(&mut s, &files, 12);
         assert_eq!(
-            count(&rows, "1  fn main() {"),
-            2,
-            "back at the top: {rows:?}"
+            buf[(TREE_WIDTH, 0)].fg,
+            theme::TEMPLATE.hi,
+            "notice border focused"
         );
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab);
-        assert_eq!(s.focus(), Panel::Old);
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
-        assert_eq!(s.active_lines(), Some((1, 1)));
     }
 
     #[test]
-    /// TU-R-075, TU-E-041, TU-E-042 — h/l and Left/Right scroll the focused side one column and the other side mirrors it; nothing moves at the first column or past the widest row's last column; a row shorter than the scroll shows only its gutter; vertical moves keep the scroll.
-    fn ut_horizontal_scroll_mirrors() {
-        let long = "x".repeat(60);
+    /// TU-R-075 — `t` on the focused diff panel toggles between the split and unified layouts, split by default; `t` on the focused tree does not.
+    fn ut_layout_toggle() {
         let files = vec![file(
             "a.rs",
             FileStatus::Modified,
-            Some(&format!("@@ -1,2 +1,2 @@\n {long}END\n-short\n+tiny\n")),
+            Some("@@ -1,3 +1,3 @@\n fn main() {\n-    old();\n+    new();\n }\n"),
         )];
         let mut s = FilesState::new(&files);
         s.take_request();
-        s.handle_blob(&files, "a.rs", text(&format!("{long}END\ntiny\n")));
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
-        assert_eq!(s.focus(), Panel::Old);
-        let (rows, _) = draw(&mut s, &files, 6);
-        assert_eq!(count(&rows, "END"), 0, "overflow cut: {rows:?}");
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('h'));
-        let (rows, _) = draw(&mut s, &files, 6);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('t'));
+        let (rows, _) = draw(&mut s, &files, 12);
         assert_eq!(
-            count(&rows, "1  xxx"),
+            count(&rows, "fn main() {"),
             2,
-            "h at the first column stays: {rows:?}"
+            "tree t is no toggle: {rows:?}"
         );
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('l'));
-        let (rows, _) = draw(&mut s, &files, 6);
-        assert_eq!(count(&rows, "1 xxx"), 2, "one column: {rows:?}");
-        assert!(
-            rows.iter()
-                .any(|r| r.contains("2 short") && r.contains("2 tiny")),
-            "{rows:?}"
-        );
-        for _ in 0..100 {
-            s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('l'));
-        }
-        assert_eq!(s.active_lines(), Some((0, 0)), "l never leaves the row");
-        let (rows, _) = draw(&mut s, &files, 6);
-        assert!(
-            rows.iter().any(|r| r.matches("1 D").count() == 2),
-            "stops at the widest row's last column: {rows:?}"
-        );
-        assert!(
-            rows.iter()
-                .any(|r| r.contains("2  ") && !r.contains("short") && !r.contains("tiny")),
-            "shorter rows show only the gutter: {rows:?}"
-        );
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
-        assert_eq!(s.active_lines(), Some((1, 1)));
-        let (rows, _) = draw(&mut s, &files, 6);
-        assert!(
-            rows.iter().any(|r| r.matches("1 D").count() == 2),
-            "vertical move keeps the scroll: {rows:?}"
-        );
-        for _ in 0..100 {
-            s.handle_key(&files, KeyModifiers::NONE, KeyCode::Left);
-        }
-        assert_eq!(s.active_lines(), Some((1, 1)), "Left never leaves the row");
-        let (rows, _) = draw(&mut s, &files, 6);
-        assert!(
-            rows.iter()
-                .any(|r| r.contains("2 -short") && r.contains("2 +tiny")),
-            "scrolled back: {rows:?}"
-        );
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab);
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab);
-        assert_eq!(s.focus(), Panel::New);
-        for _ in 0..100 {
-            s.handle_key(&files, KeyModifiers::NONE, KeyCode::Right);
-        }
-        let (rows, _) = draw(&mut s, &files, 6);
-        assert!(
-            rows.iter().any(|r| r.matches("1 D").count() == 2),
-            "mirrored from the new side: {rows:?}"
-        );
-    }
-
-    #[test]
-    /// TU-R-075, TU-E-045 — on a focused side PageDown/PageUp move a page, Ctrl+D/Ctrl+U half a page, g/G the top and bottom, 0/$ the start and end of the active line, everything clamped and mirrored; before the tab was drawn a page is one row.
-    fn ut_side_paging_and_jumps() {
-        let long = "x".repeat(60);
-        let content: String = (1..=20).map(|i| format!("line {i}\n")).collect();
-        let patch = format!("@@ -1,2 +1,2 @@\n line 1\n-old {long}END\n+line 2\n");
-        let files = vec![file("a.rs", FileStatus::Modified, Some(&patch))];
-        let mut s = FilesState::new(&files);
-        s.take_request();
-        s.handle_blob(&files, "a.rs", text(&content));
         s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::PageDown);
-        assert_eq!(
-            s.active_lines(),
-            Some((1, 1)),
-            "one row before the first draw"
-        );
-        draw(&mut s, &files, 12);
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::PageDown);
-        assert_eq!(
-            s.active_lines(),
-            Some((11, 11)),
-            "a page is the panel's inner height"
-        );
-        s.handle_key(&files, KeyModifiers::CONTROL, KeyCode::Char('d'));
-        assert_eq!(s.active_lines(), Some((16, 16)));
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::PageDown);
-        assert_eq!(s.active_lines(), Some((19, 19)), "clamped at the last row");
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::PageUp);
-        assert_eq!(s.active_lines(), Some((9, 9)));
-        s.handle_key(&files, KeyModifiers::CONTROL, KeyCode::Char('u'));
-        assert_eq!(s.active_lines(), Some((4, 4)));
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::PageUp);
-        assert_eq!(s.active_lines(), Some((0, 0)), "clamped at the first row");
-        s.handle_key(&files, KeyModifiers::SHIFT, KeyCode::Char('G'));
-        assert_eq!(s.active_lines(), Some((19, 19)));
+        assert!(s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('t')));
         let (rows, _) = draw(&mut s, &files, 12);
+        assert_eq!(count(&rows, "fn main() {"), 1, "unified: {rows:?}");
         assert!(
-            rows.iter().any(|r| r.contains("line 20")),
-            "scrolled to the bottom: {rows:?}"
+            rows.iter()
+                .any(|r| r.contains("old();") && !r.contains("new();")),
+            "sequential rows: {rows:?}"
         );
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('g'));
-        assert_eq!(s.active_lines(), Some((0, 0)));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('t'));
         let (rows, _) = draw(&mut s, &files, 12);
-        assert!(
-            rows.iter().any(|r| r.contains("line 1")),
-            "back at the top: {rows:?}"
-        );
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
-        s.handle_key(&files, KeyModifiers::SHIFT, KeyCode::Char('$'));
-        let (rows, _) = draw(&mut s, &files, 12);
-        assert_eq!(
-            count(&rows, "END"),
-            1,
-            "end of the old side's active line: {rows:?}"
-        );
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('0'));
-        let (rows, _) = draw(&mut s, &files, 12);
-        assert!(
-            rows.iter().any(|r| r.contains("-old xxx")),
-            "start of line: {rows:?}"
-        );
-        assert_eq!(count(&rows, "END"), 0, "{rows:?}");
+        assert_eq!(count(&rows, "fn main() {"), 2, "back to split: {rows:?}");
     }
 
     #[test]
-    /// TU-R-076, TU-E-035, TU-E-036, TU-E-039, TU-E-040 — a failed request shows its message in the error color, a binary file `Binary file`, a too large one `File too large`; content for an unknown path is discarded; focus on a side showing a notice still colors its border and ignores navigation keys.
-    fn ut_notices() {
+    /// TU-R-076, TU-E-035, TU-E-036, TU-E-039 — a failed request, a binary file and a too-large file keep the hunk-only patch view; content for an unknown path is discarded; full-file rows appear only after the content arrived as text.
+    fn ut_hunk_only_until_text_arrives() {
+        let patch = "@@ -2,3 +2,3 @@\n two\n-three\n+drei\n four\n";
+        let content = "one\ntwo\ndrei\nfour\nfive\n";
         let files = vec![
-            file("a", FileStatus::Modified, Some("@@ -1 +1 @@\n-x\n+y\n")),
-            file("b", FileStatus::Modified, Some("@@ -1 +1 @@\n-x\n+y\n")),
-            file("c", FileStatus::Modified, Some("@@ -1 +1 @@\n-x\n+y\n")),
+            file("a", FileStatus::Modified, Some(patch)),
+            file("b", FileStatus::Modified, Some(patch)),
+            file("c", FileStatus::Modified, Some(patch)),
+            file("d", FileStatus::Modified, Some(patch)),
         ];
         let mut s = FilesState::new(&files);
         assert_eq!(s.take_request().as_deref(), Some("a"));
         s.handle_blob(&files, "a", Err::<Blob, _>("github: HTTP 502"));
-        let (rows, buf) = draw(&mut s, &files, 6);
-        assert_eq!(count(&rows, "github: HTTP 502"), 2, "{rows:?}");
-        let (x, y) = cell(&buf, "github: HTTP 502");
-        assert_eq!(buf[(x, y)].fg, theme::TEMPLATE.error);
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert_eq!(count(&rows, "three"), 1, "hunk view stays: {rows:?}");
         s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
-        assert_eq!(s.focus(), Panel::Old);
-        let (_, buf) = draw(&mut s, &files, 6);
-        assert_eq!(
-            buf[(TREE_WIDTH, 0)].fg,
-            theme::TEMPLATE.hi,
-            "old side focused"
-        );
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::BackTab);
+        s.handle_key(&files, KeyModifiers::CONTROL, KeyCode::Char('f'));
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert_eq!(count(&rows, "one"), 0, "no full file to unfold: {rows:?}");
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+
         s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
         assert_eq!(s.take_request().as_deref(), Some("b"));
         s.handle_blob(&files, "b", Ok::<_, String>(Blob::Binary));
-        let (rows, _) = draw(&mut s, &files, 6);
-        assert_eq!(count(&rows, "Binary file"), 2, "{rows:?}");
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert_eq!(count(&rows, "three"), 1, "{rows:?}");
+
         s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
         assert_eq!(s.take_request().as_deref(), Some("c"));
-        s.handle_blob(&files, "zzz", text("ignored"));
-        let (rows, _) = draw(&mut s, &files, 6);
-        assert_eq!(count(&rows, LOADING), 2, "still loading: {rows:?}");
         s.handle_blob(&files, "c", Ok::<_, String>(Blob::TooLarge));
-        let (rows, _) = draw(&mut s, &files, 6);
-        assert_eq!(count(&rows, "File too large"), 2, "{rows:?}");
-        s.handle_blob(&files, "a", text("y\n"));
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('k'));
-        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('k'));
-        assert_eq!(s.take_request(), None);
-        let (rows, _) = draw(&mut s, &files, 6);
-        assert!(
-            rows.iter()
-                .any(|r| r.contains("1 -x") && r.contains("1 +y")),
-            "{rows:?}"
-        );
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert_eq!(count(&rows, "three"), 1, "{rows:?}");
+
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        assert_eq!(s.take_request().as_deref(), Some("d"));
+        s.handle_blob(&files, "zzz", text(content));
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert_eq!(count(&rows, "three"), 1, "unknown path discarded: {rows:?}");
+        s.handle_blob(&files, "d", text(content));
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        s.handle_key(&files, KeyModifiers::CONTROL, KeyCode::Char('f'));
+        let (rows, _) = draw(&mut s, &files, 12);
+        assert_eq!(count(&rows, "one"), 2, "full file unfolded: {rows:?}");
+        assert_eq!(count(&rows, "five"), 2, "{rows:?}");
     }
 
     #[test]
-    /// TU-E-033 — with no files the tree reads `None`, the diff sides stay empty, nothing is requested and keys do nothing.
+    /// TU-E-032 — a hostile or truncated patch renders without a crash.
+    fn ut_garbage_patch_renders() {
+        let files = vec![file(
+            "a",
+            FileStatus::Modified,
+            Some("@@ nonsense @@\n+x\nno prefix\n@@ -1,999"),
+        )];
+        let mut s = FilesState::new(&files);
+        s.take_request();
+        draw(&mut s, &files, 8);
+    }
+
+    #[test]
+    /// TU-E-033 — with no files the tree is empty, the diff panel stays empty, nothing is requested and keys do nothing.
     fn ut_no_files() {
         let mut s = FilesState::new(&[]);
         assert_eq!(s.take_request(), None);
-        for code in [KeyCode::Char('j'), KeyCode::Char('k'), KeyCode::Tab] {
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Enter,
+            KeyCode::Tab,
+        ] {
             s.handle_key(&[], KeyModifiers::NONE, code);
         }
         s.handle_key(&[], KeyModifiers::NONE, KeyCode::Char('j'));
         s.handle_blob(&[], "x", text("x"));
         let (rows, _) = draw(&mut s, &[], 8);
-        assert!(rows[1].contains("None"), "{rows:?}");
+        assert!(rows[0].contains(" Files "), "{rows:?}");
         assert!(
-            !rows
-                .iter()
-                .any(|l| l.contains("No diff") || l.contains(LOADING)),
-            "{rows:?}"
+            !rows.iter().any(|l| l.contains("No diff")),
+            "diff panel empty: {rows:?}"
+        );
+    }
+
+    #[test]
+    /// TU-R-082, TU-R-081, TU-E-052, TU-E-053 — outside review mode `c` on the focused diff notices `no review: run :review`; in review mode `c` opens the comment panel under the diff with an editable draft editor on the selected rows, marks the lines and takes the focus; Tab cycles tree → diff → comment → tree while the panel is shown; Esc on the panel returns the focus to the diff; `c` on a notice panel reads `no line to comment`.
+    fn ut_comment_flow() {
+        let files = vec![file(
+            "a.rs",
+            FileStatus::Modified,
+            Some("@@ -1,3 +1,3 @@\n fn main() {\n-    old();\n+    new();\n }\n"),
+        )];
+        let mut s = FilesState::with_review(&files, &[]);
+        s.take_request();
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        assert!(s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('c')));
+        assert_eq!(
+            s.review().and_then(|r| r.notice()),
+            Some("no review: run :review"),
+            "TU-E-052"
+        );
+        assert_eq!(s.focus(), Panel::Diff);
+
+        s.review_mut().expect("review panel").active = true;
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('j'));
+        assert!(s.handle_key(&files, KeyModifiers::NONE, KeyCode::Char('c')));
+        assert_eq!(s.focus(), Panel::Comment, "the editor takes the focus");
+        let (rows, _) = draw(&mut s, &files, 20);
+        assert!(
+            rows.iter().any(|r| r.contains(" comment ")),
+            "editor panel under the diff: {rows:?}"
+        );
+        for key in [
+            KeyCode::Char('i'),
+            KeyCode::Char('h'),
+            KeyCode::Char('i'),
+            KeyCode::Esc,
+        ] {
+            s.handle_key(&files, KeyModifiers::NONE, key);
+        }
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(s.focus(), Panel::Tree, "comment → tree");
+        let review = s.review().expect("review panel");
+        assert_eq!(review.pending().0[0].body, "hi", "saved on unfocus");
+        assert_eq!(review.marks("a.rs").len(), 1, "gutter mark");
+        assert_eq!(review.marks("a.rs")[0].color, theme::TEMPLATE.review);
+
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(s.focus(), Panel::Diff);
+        s.handle_key(&files, KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(s.focus(), Panel::Comment, "shown thread keeps the stop");
+        assert!(s.handle_key(&files, KeyModifiers::NONE, KeyCode::Esc));
+        assert_eq!(s.focus(), Panel::Diff, "Esc back to the diff");
+
+        let none = vec![file("b.rs", FileStatus::Modified, None)];
+        let mut s = FilesState::with_review(&none, &[]);
+        s.review_mut().expect("review panel").active = true;
+        s.handle_key(&none, KeyModifiers::NONE, KeyCode::Tab);
+        assert!(s.handle_key(&none, KeyModifiers::NONE, KeyCode::Char('c')));
+        assert_eq!(
+            s.review().and_then(|r| r.notice()),
+            Some("no line to comment"),
+            "TU-E-053"
         );
     }
 }

@@ -27,7 +27,8 @@ Thumbs.db
 # Rust build artifacts
 target/
 
-
 # Added by cargo
-
 /target
+
+# Prodgy
+.prodgy.toml
