@@ -10,7 +10,8 @@ use ratatui::widgets::StatefulWidget;
 use crate::command::{self, Cmd};
 use crate::config::profile::{profile_base, store_profile};
 use crate::config::{
-    Board, ConfigError, Origin, Profile, Remote, Section, Settings, Source, UserConfig, store,
+    Board, ConfigError, Origin, Profile, Remote, Section, Settings, Source, UserConfig, paths,
+    store,
 };
 use crate::event::Message;
 use crate::github::review::ReviewAction;
@@ -126,6 +127,26 @@ pub struct App {
 }
 
 impl App {
+    /// Resolves the repository and loads the configuration, everything that runs
+    /// before the alternate screen.
+    pub fn init() -> Result<App, ConfigError> {
+        let cwd = std::env::current_dir().map_err(|source| ConfigError::Io {
+            path: PathBuf::from("."),
+            source,
+        })?;
+        let root =
+            paths::find_repo_root(&cwd).ok_or_else(|| ConfigError::NoRepository(cwd.clone()))?;
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let user_path =
+            paths::user_config_path(std::env::var_os("XDG_CONFIG_HOME").as_deref(), &home);
+        let user_config = store::load_user_config(&user_path)?;
+        let settings = store::resolve(&user_config, &root);
+        let origin = Origin::of_repo(&root);
+        Ok(App::new(root, user_path, user_config, settings, origin))
+    }
+
     /// Opens the configuration dialog when `settings` is `None`.
     pub fn new(
         repo_root: PathBuf,

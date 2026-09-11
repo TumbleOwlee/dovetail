@@ -11,39 +11,20 @@ mod testkit;
 mod view;
 
 use std::io::Stdout;
-use std::path::PathBuf;
 
 use clap::Parser;
 use ferrowl_ui::AlternateScreen;
 
 use crate::app::App;
-use crate::config::{ConfigError, Origin, paths, store};
 
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {}
 
-/// Everything that runs before the alternate screen: resolve the repository, load both files.
-fn prepare() -> Result<App, ConfigError> {
-    let cwd = std::env::current_dir().map_err(|source| ConfigError::Io {
-        path: PathBuf::from("."),
-        source,
-    })?;
-    let root = paths::find_repo_root(&cwd).ok_or_else(|| ConfigError::NoRepository(cwd.clone()))?;
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let user_path = paths::user_config_path(std::env::var_os("XDG_CONFIG_HOME").as_deref(), &home);
-    let user_config = store::load_user_config(&user_path)?;
-    let settings = store::resolve(&user_config, &root);
-    let origin = Origin::of_repo(&root);
-    Ok(App::new(root, user_path, user_config, settings, origin))
-}
-
 #[tokio::main]
 async fn main() {
     let Cli {} = Cli::parse();
-    let mut app = match prepare() {
+    let mut app = match App::init() {
         Ok(app) => app,
         Err(e) => {
             eprintln!("error: {e}");
