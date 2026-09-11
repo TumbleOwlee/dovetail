@@ -57,7 +57,7 @@ pub const TEMPLATE: ColorTemplate = ColorTemplate {
     error: COLOR_SCHEME.error,
     success: COLOR_SCHEME.success,
     warning: COLOR_SCHEME.warning,
-    review: Color::Rgb(110, 64, 170),
+    review: Color::Rgb(72, 40, 116),
     timeline: TimelineColors {
         comment: COLOR_SCHEME.border,
         closed: COLOR_SCHEME.error,
