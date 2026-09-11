@@ -742,13 +742,27 @@ impl DetailsDialog {
         matches!(self.content, Content::Loaded { posting: true, .. })
     }
 
+    /// The request that loads these details anew; nothing before they are loaded.
+    pub fn refetch(&self) -> Option<CommentRefetch> {
+        let Content::Loaded { content, .. } = &self.content else {
+            return None;
+        };
+        Some(match &content.panes {
+            Panes::Pull { owner, repo, .. } => CommentRefetch::Pull(PullRequestRef {
+                owner: owner.clone(),
+                repo: repo.clone(),
+                number: self.number,
+            }),
+            Panes::Conversation => CommentRefetch::Issue(content.subject_id.clone()),
+        })
+    }
+
     /// Applies a posted comment's outcome; success answers what to request anew.
     pub fn handle_comment(
         &mut self,
         result: Result<String, crate::github::GithubError>,
     ) -> Option<CommentRefetch> {
         let Content::Loaded {
-            content,
             comment,
             comment_focused,
             posting,
@@ -763,14 +777,7 @@ impl DetailsDialog {
             Ok(_) => {
                 *comment = None;
                 *comment_focused = false;
-                Some(match &content.panes {
-                    Panes::Pull { owner, repo, .. } => CommentRefetch::Pull(PullRequestRef {
-                        owner: owner.clone(),
-                        repo: repo.clone(),
-                        number: self.number,
-                    }),
-                    Panes::Conversation => CommentRefetch::Issue(content.subject_id.clone()),
-                })
+                self.refetch()
             }
             Err(error) => {
                 *notice = Some(format!("comment failed: {error}"));

@@ -537,6 +537,17 @@ impl App {
     /// Dialog first, then the command line, then the main view.
     pub fn handle_key(&mut self, modifiers: KeyModifiers, code: KeyCode) {
         self.command_line.clear_error();
+        if modifiers == KeyModifiers::CONTROL && code == KeyCode::Char('r') {
+            match self.pull.as_ref().or(self.issue.as_ref()) {
+                Some(overlay) => match overlay.refetch() {
+                    Some(CommentRefetch::Pull(pull)) => self.request_pull(pull),
+                    Some(CommentRefetch::Issue(id)) => self.request_issue_by_id(id),
+                    None => {}
+                },
+                None => self.execute(Cmd::Reload),
+            }
+            return;
+        }
         if let Some(dialog) = self.dialog.as_mut() {
             match dialog.handle_key(modifiers, code) {
                 DialogEvent::Consumed => {}
@@ -1485,6 +1496,65 @@ mod tests {
         key(&mut a, KeyCode::Esc);
         command(&mut a, "reload");
         assert_eq!(a.command_line.error(), Some("not configured"));
+    }
+
+    #[test]
+    /// TU-R-087 — Ctrl+R with no overlay acts as the reload command, `not configured` included.
+    fn ut_ctrl_r_reloads_main_view() {
+        let t = TempDir::new("ctrlr");
+        let mut a = app(&t, Some(settings()));
+        a.take_fetch_requests();
+        a.handle_message(Message::Board(Ok(loaded_board())));
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('r'));
+        assert_eq!(a.take_fetch_requests().len(), 1);
+        assert!(matches!(a.board, BoardState::Loading));
+        let mut a = app(&t, Some(jira_settings()));
+        key(&mut a, KeyCode::Esc);
+        a.take_fetch_requests();
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('r'));
+        assert!(a.take_fetch_requests().is_empty());
+        assert_eq!(a.command_line.error(), Some("not configured"));
+    }
+
+    #[test]
+    /// TU-R-087, TU-E-063 — Ctrl+R on an open pull request overlay requests its details anew once loaded; while it still loads no request is queued and the overlay stays.
+    fn ut_ctrl_r_refetches_open_overlay() {
+        let t = TempDir::new("ctrlroverlay");
+        let mut a = app(&t, Some(remote_settings()));
+        a.take_fetch_requests();
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('t'));
+        key(&mut a, KeyCode::Char('1'));
+        a.handle_message(Message::PullRequests(Ok(vec![
+            crate::github::pulls::PullRequest {
+                number: 5,
+                ..Default::default()
+            },
+        ])));
+        key(&mut a, KeyCode::Enter);
+        a.take_fetch_requests();
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('r'));
+        assert!(a.take_fetch_requests().is_empty());
+        assert!(a.pull.is_some());
+        a.handle_message(Message::PullRequest(Ok(crate::github::pull::PullDetails {
+            number: 5,
+            head_oid: "0123abcd".into(),
+            repository: "o/r".into(),
+            ..Default::default()
+        })));
+        a.take_fetch_requests();
+        a.handle_key(KeyModifiers::CONTROL, KeyCode::Char('r'));
+        let requests = a.take_fetch_requests();
+        assert_eq!(
+            requests,
+            vec![FetchRequest::PullRequest {
+                token: "t".into(),
+                owner: "o".into(),
+                repo: "r".into(),
+                number: 5,
+            }],
+            "{requests:?}"
+        );
+        assert!(a.pull.is_some());
     }
 
     #[test]

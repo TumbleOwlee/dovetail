@@ -88,3 +88,4 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-060** | `c`, `submit` or `discard` while a comment post runs | `busy` in the message popup; nothing changes; cites TU-R-086 |
 | **TU-E-061** | The overlay closes while a comment draft exists or a post runs | The draft is dropped; a comment already accepted by GitHub stays there; cites TU-R-086 |
 | **TU-E-062** | `discard` with no comment draft on the conversation view | `no comment to discard` in the message popup; cites TU-R-086 |
+| **TU-E-063** | `Ctrl+R` while the details overlay is still loading or failed | No request is queued; the overlay stays as is; cites TU-R-087 |
