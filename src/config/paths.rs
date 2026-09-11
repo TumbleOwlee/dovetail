@@ -21,11 +21,6 @@ pub fn user_config_path(xdg_config_home: Option<&OsStr>, home: &Path) -> PathBuf
     base.join("prodgy").join("config.toml")
 }
 
-/// `.prodgy.toml` in the repository root.
-pub fn repo_config_path(root: &Path) -> PathBuf {
-    root.join(".prodgy.toml")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,15 +75,6 @@ mod tests {
         assert_eq!(
             user_config_path(Some(OsStr::new("")), home),
             PathBuf::from("/home/u/.config/prodgy/config.toml")
-        );
-    }
-
-    #[test]
-    /// CF-R-004 — the repository-level file is `.prodgy.toml` in the root.
-    fn ut_repo_config_path_is_dot_prodgy_toml() {
-        assert_eq!(
-            repo_config_path(Path::new("/r")),
-            PathBuf::from("/r/.prodgy.toml")
         );
     }
 }

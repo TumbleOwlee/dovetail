@@ -33,8 +33,6 @@ pub enum ConfigError {
         section_kind: Kind,
         profile_kind: Kind,
     },
-    #[error("{path}: a repository-level file must not carry credentials")]
-    RepoFileCredentials { path: PathBuf },
     #[error("{path}: {message}")]
     Serialize { path: PathBuf, message: String },
 }

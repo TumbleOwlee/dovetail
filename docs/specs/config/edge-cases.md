@@ -13,8 +13,7 @@ IDs stable, append-only (CF-E-nnn), numbered independently of the area's `-R-` s
 | ID | Condition | Behavior |
 |---|---|---|
 | **CF-E-001** | `XDG_CONFIG_HOME` is set but empty | The `$HOME/.config` fallback is used; cites CF-R-003 |
-| **CF-E-002** | The repository-level file exists but fails to parse or validate | Load error; the user-level entry is not consulted as a fallback; cites CF-R-005, CF-R-027 |
-| **CF-E-003** | The user-level file exists but fails to parse or validate | Load error even when a repository-level file would have supplied the settings, since the profiles it holds may be needed later; cites CF-R-027 |
+| **CF-E-003** | The user-level file exists but fails to parse or validate | Load error; cites CF-R-027 |
 | **CF-E-004** | `[[repo]]` `path` matches the active root only after canonicalization (symlinked checkout) | The entry matches; comparison is on canonical paths; cites CF-R-006 |
 
 ## Known limitations — intentional constraints

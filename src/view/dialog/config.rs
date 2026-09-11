@@ -1106,7 +1106,7 @@ mod tests {
                 owner: "o".into(),
                 repo: "r".into(),
             },
-            source: Source::RepoFile,
+            source: Source::UserFile,
         };
         let d = ConfigDialog::from_settings(&settings, &UserConfig::default(), None);
         assert_eq!(d.value(Field::Owner), "o");
@@ -1403,7 +1403,7 @@ mod tests {
                 owner: "other".into(),
                 repo: "other".into(),
             },
-            source: Source::RepoFile,
+            source: Source::UserFile,
         };
         let d = ConfigDialog::from_settings(&settings, &UserConfig::default(), None);
         assert_eq!(d.value(Field::Owner), "board-owner");
@@ -1418,7 +1418,7 @@ mod tests {
                 owner: "ro".into(),
                 repo: "rr".into(),
             },
-            source: Source::RepoFile,
+            source: Source::UserFile,
         };
         let d = ConfigDialog::from_settings(&jira, &UserConfig::default(), None);
         assert_eq!(d.value(Field::Owner), "ro");

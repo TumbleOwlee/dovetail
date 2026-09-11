@@ -52,10 +52,9 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **TU-R-030** — The `board` command shall activate the Task Board tab.
 **TU-R-031** — The `remote` command shall activate the Git Remote tab.
 **TU-R-032** — The `w` command shall write the held repository settings to the user-level configuration file.
-**TU-R-033** — The `wr` command shall write the held repository settings to the repository-level configuration file without credentials.
 **TU-R-034** — An unrecognised command shall show `unknown command: <input>` in the command line area until the next key press.
-**TU-R-035** — The `w` and `wr` commands with no repository settings shall show `not configured` in the command line area instead of writing.
-**TU-R-036** — A write failure from `w` or `wr` shall show the error in the command line area until the next key press.
+**TU-R-035** — The `w` command with no repository settings shall show `not configured` in the command line area instead of writing.
+**TU-R-036** — A write failure from `w` shall show the error in the command line area until the next key press.
 
 ## Option lists in the configuration dialog
 

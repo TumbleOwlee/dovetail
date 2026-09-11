@@ -200,14 +200,6 @@ pub struct UserConfig {
     pub repo: Vec<RepoEntry>,
 }
 
-/// The repository-level file: one entry's sections without `path`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RepoConfig {
-    pub board: Board,
-    pub remote: Remote,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,23 +340,6 @@ repo = "r"
 "#;
         let err = toml::from_str::<UserConfig>(section).expect_err("rejects");
         assert!(err.to_string().contains("extra"), "{err}");
-    }
-
-    #[test]
-    /// CF-R-021 — the repository-level file is the two sections at top level.
-    fn ut_repo_config_parses_top_level_sections() {
-        let text = r#"
-[board]
-kind = "jira"
-project_key = "A"
-[remote]
-kind = "github"
-owner = "o"
-repo = "r"
-"#;
-        let cfg: RepoConfig = toml::from_str(text).expect("parses");
-        assert_eq!(cfg.board.kind(), Kind::Jira);
-        assert_eq!(cfg.remote.kind(), Kind::Github);
     }
 
     #[test]

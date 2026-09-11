@@ -35,8 +35,7 @@ fn prepare() -> Result<App, ConfigError> {
         .unwrap_or_default();
     let user_path = paths::user_config_path(std::env::var_os("XDG_CONFIG_HOME").as_deref(), &home);
     let user_config = store::load_user_config(&user_path)?;
-    let repo_file = store::load_repo_config(&paths::repo_config_path(&root))?;
-    let settings = store::resolve(&user_config, repo_file, &root);
+    let settings = store::resolve(&user_config, &root);
     let origin = Origin::of_repo(&root);
     Ok(App::new(root, user_path, user_config, settings, origin))
 }

@@ -13,12 +13,10 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **CF-R-001** — The application shall resolve the active repository root as the nearest ancestor of the current working directory (the directory itself included) that contains a `.git` entry.
 **CF-R-002** — When no active repository root can be resolved, the application shall print a single-line error to standard error and exit with a non-zero status without entering the alternate screen.
 **CF-R-003** — The user-level configuration file shall be `$XDG_CONFIG_HOME/prodgy/config.toml` when `XDG_CONFIG_HOME` is set and non-empty, and `$HOME/.config/prodgy/config.toml` otherwise.
-**CF-R-004** — The repository-level configuration file shall be `.prodgy.toml` in the active repository root.
-**CF-R-005** — When the repository-level file exists, the repository settings shall be taken from it and the user-level `[[repo]]` entries shall not be consulted for settings.
-**CF-R-006** — When no repository-level file exists, the repository settings shall be taken from the user-level `[[repo]]` entry whose `path` equals the canonical path of the active repository root.
-**CF-R-007** — When neither source yields repository settings, the application shall start with no repository settings.
+**CF-R-004** — The application shall neither read nor write a repository-level configuration file; an existing `.prodgy.toml` in the repository root is ignored.
+**CF-R-006** — The repository settings shall be taken from the user-level `[[repo]]` entry whose `path` equals the canonical path of the active repository root.
+**CF-R-007** — When the user-level file yields no entry for the active repository, the application shall start with no repository settings.
 **CF-R-008** — A missing user-level file shall be treated as an empty configuration with no profiles and no repository entries.
-**CF-R-009** — Credential profiles referenced by a repository-level file's sections shall not exist; a section loaded from the repository-level file shall carry no profile reference and no credential values.
 
 ## Schema
 
@@ -33,7 +31,6 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **CF-R-018** — A `github` remote section shall carry `owner` and `repo`.
 **CF-R-019** — A `bitbucket` remote section shall carry `workspace` and `repo`.
 **CF-R-020** — A `board` or `remote` section in the user-level file may carry `credentials`, naming a profile in the same file.
-**CF-R-021** — The repository-level file shall carry `board` and `remote` at its top level with the same section schema as a `[[repo]]` entry, and no `path`.
 **CF-R-022** — A key not defined by the schema, in any table, shall be a load error naming the key.
 
 ## Validation
@@ -41,7 +38,6 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **CF-R-023** — Two `[[repo]]` entries with the same `path` shall be a load error naming the path.
 **CF-R-024** — A `credentials` reference naming a profile absent from the file shall be a load error naming the reference.
 **CF-R-025** — A `credentials` reference whose profile `kind` differs from the referencing section's `kind` shall be a load error naming both kinds.
-**CF-R-026** — A repository-level file containing a `credentials` key in a section, or a top-level `credentials` table, shall be a load error.
 **CF-R-027** — A load error shall be printed as a single line on standard error followed by a non-zero exit, without entering the alternate screen.
 
 ## Writing
@@ -51,7 +47,6 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **CF-R-030** — When the section being written already references a profile, that profile shall be updated in place.
 **CF-R-031** — When the section being written references no profile, the profile name shall be `board-<dir>` for the board section and `remote-<dir>` for the remote section, where `<dir>` is the file name of the active repository root.
 **CF-R-032** — When the derived profile name is already taken, the suffix `-2`, `-3`, … shall be appended, taking the first free name.
-**CF-R-033** — Writing the repository-level file shall emit the `board` and `remote` sections with every key except `credentials`.
 **CF-R-034** — Writing shall create the target file's missing parent directories.
 **CF-R-036** — When the dialog confirms with both sections sharing the same credential values, one profile shall be stored and both sections shall reference it.
 **CF-R-035** — A write failure shall be reported as an error and shall not terminate the application.

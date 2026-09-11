@@ -9,8 +9,7 @@ use ratatui::layout::{Constraint, Layout};
 use crate::command::{self, Cmd};
 use crate::config::profile::{profile_base, store_profile};
 use crate::config::{
-    Board, ConfigError, Origin, Profile, Remote, Section, Settings, Source, UserConfig, paths,
-    store,
+    Board, ConfigError, Origin, Profile, Remote, Section, Settings, Source, UserConfig, store,
 };
 use crate::event::Message;
 use crate::github::review::ReviewAction;
@@ -676,7 +675,6 @@ impl App {
             Cmd::Board => self.active_tab = Tab::Board,
             Cmd::Remote => self.active_tab = Tab::Remote,
             Cmd::Write => self.report(self.settings.is_some(), App::write_user),
-            Cmd::WriteRepo => self.report(self.settings.is_some(), App::write_repo),
             Cmd::Reload => {
                 let board = self.request_board();
                 let remote = self.request_remote();
@@ -811,17 +809,6 @@ impl App {
         store::save_user_config(&self.user_path, &candidate)?;
         self.user_config = candidate;
         Ok(())
-    }
-
-    fn write_repo(&mut self) -> Result<(), ConfigError> {
-        let Some(settings) = &self.settings else {
-            return Ok(());
-        };
-        store::save_repo_config(
-            &paths::repo_config_path(&self.repo_root),
-            &settings.board,
-            &settings.remote,
-        )
     }
 }
 
@@ -1127,21 +1114,7 @@ mod tests {
     }
 
     #[test]
-    /// TU-R-033, CF-R-033 — `:wr` writes the repository file without credentials.
-    fn ut_write_repo_command() {
-        let t = TempDir::new("wr");
-        let mut a = app(&t, Some(settings()));
-        command(&mut a, "wr");
-        assert_eq!(a.command_line.error(), None);
-        let text = std::fs::read_to_string(a.repo_root.join(".prodgy.toml")).expect("written");
-        assert!(
-            text.contains("owner = \"o\"") && !text.contains("credentials"),
-            "{text}"
-        );
-    }
-
-    #[test]
-    /// TU-R-035 — `:w` and `:wr` without settings report `not configured`.
+    /// TU-R-035 — `:w` without settings reports `not configured`.
     fn ut_write_without_settings_errors() {
         let t = TempDir::new("wnone");
         let mut a = app(&t, None);
@@ -1150,18 +1123,15 @@ mod tests {
         a.settings = None;
         command(&mut a, "w");
         assert_eq!(a.command_line.error(), Some("not configured"));
-        command(&mut a, "wr");
-        assert_eq!(a.command_line.error(), Some("not configured"));
     }
 
     #[test]
-    /// TU-R-036, CF-R-035 — a failed `:wr` shows the error and the app keeps running.
-    fn ut_write_repo_failure_shows_error() {
-        let t = TempDir::new("wrfail");
+    /// TU-R-036, CF-R-035 — a failed `:w` shows the error and the app keeps running.
+    fn ut_write_failure_shows_error() {
+        let t = TempDir::new("wfail");
         let mut a = app(&t, Some(settings()));
-        std::fs::create_dir_all(a.repo_root.join(".prodgy.toml"))
-            .expect("directory blocks the file");
-        command(&mut a, "wr");
+        std::fs::create_dir_all(&a.user_path).expect("directory blocks the file");
+        command(&mut a, "w");
         assert!(a.command_line.error().is_some());
         assert!(!a.should_quit());
     }
@@ -1310,10 +1280,9 @@ mod tests {
         let mut a = app(&t, None);
         assert!(a.take_fetch_requests().is_empty());
         assert!(a.dialog.is_some());
-        let mut repo_file = settings();
-        repo_file.board.set_credentials(None);
-        repo_file.source = Source::RepoFile;
-        let mut a = app(&t, Some(repo_file));
+        let mut without = settings();
+        without.board.set_credentials(None);
+        let mut a = app(&t, Some(without));
         command(&mut a, "config");
         assert!(a.take_fetch_requests().is_empty());
         assert!(a.dialog.is_some());
