@@ -95,3 +95,4 @@ IDs stable, append-only (TU-E-nnn), numbered independently of the area's `-R-` s
 | **TU-E-067** | The overlay closes while a pending edit exists or an edit submit runs | The pending edits are dropped; an edit already accepted by GitHub stays applied; cites TU-R-095 |
 | **TU-E-068** | The viewer may update neither the body nor any timeline comment | The focus cycle holds only the sidebar boxes and the comment draft box while one is open; `e` never reaches an editable box; cites TU-R-089 |
 | **TU-E-069** | A submit fails partway through the draft and the pending edits | The posts and edits GitHub already accepted stay applied, the unsent draft and pending edits stay local so a retry sends only those, and the error shows in the message popup; cites TU-R-095 |
+| **TU-E-070** | A library widget exposes no override for some part of its text style | That part keeps the widget's own default and is not worked around by redrawing the widget's output; cites TU-R-101 |
