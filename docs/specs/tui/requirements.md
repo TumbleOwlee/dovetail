@@ -41,6 +41,8 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **TU-R-022** — The Task Board tab body shall stay empty while its section allows no request; the configuration is never rendered as text in the main view.
 **TU-R-023** — The Git Remote tab body shall stay empty while its section allows no request; the configuration is never rendered as text in the main view.
 **TU-R-024** — When the application starts with repository settings whose board or remote section's credentials do not resolve to a stored profile, the configuration dialog shall open as the `config` command would (TU-R-038, TU-R-039); with no repository settings the first-run dialog opens as before.
+**TU-R-100** — The color template's text color (TU-R-070) — the color every glyph takes that carries no role-specific color of its own (highlight, error, success, review, placeholder, a timeline entry type) — shall be white.
+**TU-R-101** — Every library widget a view draws (the diff, file tree, markdown and editor widgets and any input field) shall be configured with the template's text color (TU-R-100) as the style of its own text, so no widget renders text in a built-in default of its own.
 
 ## Command line
 
@@ -123,5 +125,3 @@ Added via workflow in [`AGENTS.md`](../../../AGENTS.md): gate 1 approves "shall"
 **TU-R-097** — `discard` on those views shall drop every pending edit beside the draft, each box returning to its loaded body.
 **TU-R-098** — Esc in the focused comment draft editor shall park the focus on the draft box itself, so no bar box is highlighted and the next Tab continues from the draft box in the cycle of TU-R-089.
 **TU-R-099** — Esc in a focused inline editor (TU-R-091) shall park the focus on that description card or timeline comment box, so the next Tab continues from it in the cycle of TU-R-089.
-**TU-R-100** — The color template's text color (TU-R-070) — the color every glyph takes that carries no role-specific color of its own (highlight, error, success, review, placeholder, a timeline entry type) — shall be white.
-**TU-R-101** — Every library widget a view draws (the diff, file tree, markdown and editor widgets and any input field) shall be configured with the template's text color (TU-R-100) as the style of its own text, so no widget renders text in a built-in default of its own.
