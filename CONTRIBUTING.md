@@ -1,4 +1,4 @@
-# Contributing to prodgy
+# Contributing to dovetail
 
 ## Setup
 
@@ -20,7 +20,7 @@ Optionally install [lefthook](https://github.com/evilmartians/lefthook) and run 
 
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the module map and data flow, and [`PRD.md`](./PRD.md) for the product framing.
 
-`prodgy` is **spec-driven**: [`docs/specs/`](./docs/specs/) is the authoritative specification of what it must do, split by capability area. The code is expected to conform to it. Before changing behavior, read the relevant area's `requirements.md` and `edge-cases.md`.
+`dovetail` is **spec-driven**: [`docs/specs/`](./docs/specs/) is the authoritative specification of what it must do, split by capability area. The code is expected to conform to it. Before changing behavior, read the relevant area's `requirements.md` and `edge-cases.md`.
 
 ## Test-driven development
 
