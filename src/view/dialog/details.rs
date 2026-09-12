@@ -19,7 +19,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, StatefulWidget, Widget};
 
 use crate::github::blob::Blob;
 use crate::github::board::Label;
-use crate::github::comment::{CommentAction, CommentResult};
+use crate::github::comment::{CommentAction, CommentResult, Edit, EditTarget};
 use crate::github::files::ChangedFile;
 use crate::github::pull::{Commit, ReviewState, ReviewThread};
 use crate::github::review::{ReviewAction, ReviewOutcome, ReviewResult, Verdict};
@@ -427,8 +427,9 @@ enum Content {
         pending: BTreeMap<EditKey, String>,
         /// A card the next render must scroll fully into view (TU-R-090).
         reveal: Option<EditKey>,
-        /// A comment post is running; the draft is locked until its outcome.
-        posting: bool,
+        /// A submit is running: the keys of the edits it carries, in the order sent, so a
+        /// partial failure can drop exactly the accepted ones.
+        submitting: Option<Vec<EditKey>>,
         /// A message popup outside review mode, dismissed by the next key.
         notice: Option<String>,
     },
@@ -475,7 +476,7 @@ impl DetailsDialog {
                 comment: None,
                 pending: BTreeMap::new(),
                 reveal: None,
-                posting: false,
+                submitting: None,
                 notice: None,
             },
             Err(e) => Content::Failed(e.to_string()),
@@ -611,7 +612,7 @@ impl DetailsDialog {
             comment,
             pending,
             reveal,
-            posting,
+            submitting,
             notice,
         } = &mut self.content
         else {
@@ -718,7 +719,7 @@ impl DetailsDialog {
                 }
                 match (modifiers, code) {
                     (KeyModifiers::NONE, KeyCode::Char('c')) => {
-                        if *posting {
+                        if submitting.is_some() {
                             *notice = Some("busy".to_string());
                         } else {
                             let state = comment.get_or_insert_with(|| {
@@ -734,7 +735,7 @@ impl DetailsDialog {
                         return DetailsEvent::Consumed;
                     }
                     (KeyModifiers::NONE, KeyCode::Char('e')) => {
-                        if *posting {
+                        if submitting.is_some() {
                             *notice = Some("busy".to_string());
                             return DetailsEvent::Consumed;
                         }
@@ -945,7 +946,8 @@ impl DetailsDialog {
             content,
             comment,
             focus,
-            posting,
+            pending,
+            submitting,
             notice,
             ..
         } = &mut self.content
@@ -956,23 +958,54 @@ impl DetailsDialog {
         match words.as_slice() {
             [] => DetailsEvent::Consumed,
             ["submit"] => {
-                if *posting {
+                if submitting.is_some() {
                     *notice = Some("busy".to_string());
                     return DetailsEvent::Consumed;
                 }
-                let body = comment
+                // Save whatever is being typed before reading the draft and the pending edits.
+                apply_leave(content, focus, comment, pending);
+                let draft = comment
                     .as_ref()
                     .map(|state| state.content().trim().to_string())
-                    .unwrap_or_default();
-                if body.is_empty() {
+                    .filter(|body| !body.is_empty());
+                let mut keys: Vec<EditKey> = Vec::new();
+                let edits: Vec<Edit> = pending
+                    .iter()
+                    .filter_map(|(key, body)| {
+                        let target = match *key {
+                            EditKey::Body => match &content.panes {
+                                Panes::Conversation => EditTarget::IssueBody {
+                                    id: content.subject_id.clone(),
+                                },
+                                Panes::Pull { .. } => EditTarget::PullBody {
+                                    id: content.subject_id.clone(),
+                                },
+                            },
+                            EditKey::Comment(i) => {
+                                match content.timeline.get(i).map(|t| &t.event) {
+                                    Some(Event::Comment { id, .. }) => {
+                                        EditTarget::Comment { id: id.clone() }
+                                    }
+                                    _ => return None,
+                                }
+                            }
+                        };
+                        keys.push(*key);
+                        Some(Edit {
+                            target,
+                            body: body.clone(),
+                        })
+                    })
+                    .collect();
+                if draft.is_none() && edits.is_empty() {
                     *notice = Some("no comment to submit".to_string());
                     return DetailsEvent::Consumed;
                 }
-                *posting = true;
+                *submitting = Some(keys);
                 DetailsEvent::Submit(CommentAction {
                     subject_id: content.subject_id.clone(),
-                    draft: Some(body),
-                    edits: Vec::new(),
+                    draft,
+                    edits,
                 })
             }
             ["submit", ..] => {
@@ -980,15 +1013,14 @@ impl DetailsDialog {
                 DetailsEvent::Consumed
             }
             ["discard"] => {
-                if *posting {
+                if submitting.is_some() {
                     *notice = Some("busy".to_string());
-                } else if comment.is_none() {
+                } else if comment.is_none() && pending.is_empty() {
                     *notice = Some("no comment to discard".to_string());
                 } else {
                     *comment = None;
-                    if matches!(focus, Focus::Draft | Focus::DraftEditing) {
-                        *focus = Focus::Sidebar(0);
-                    }
+                    pending.clear();
+                    *focus = Focus::Sidebar(0);
                 }
                 DetailsEvent::Consumed
             }
@@ -999,9 +1031,15 @@ impl DetailsDialog {
         }
     }
 
-    /// Whether a conversation comment post is in flight, for routing its outcome.
+    /// Whether a conversation submit is in flight, for routing its outcome.
     pub fn posting(&self) -> bool {
-        matches!(self.content, Content::Loaded { posting: true, .. })
+        matches!(
+            self.content,
+            Content::Loaded {
+                submitting: Some(_),
+                ..
+            }
+        )
     }
 
     /// The request that loads these details anew; nothing before they are loaded.
@@ -1024,23 +1062,32 @@ impl DetailsDialog {
         let Content::Loaded {
             comment,
             focus,
-            posting,
+            pending,
+            submitting,
             notice,
             ..
         } = &mut self.content
         else {
             return None;
         };
-        *posting = false;
+        let keys = submitting.take().unwrap_or_default();
         match result.outcome {
             Ok(()) => {
                 *comment = None;
-                if matches!(focus, Focus::Draft | Focus::DraftEditing) {
-                    *focus = Focus::Sidebar(0);
-                }
+                pending.clear();
+                *focus = Focus::Sidebar(0);
                 self.refetch()
             }
             Err(error) => {
+                if result.posted {
+                    *comment = None;
+                    if matches!(focus, Focus::Draft | Focus::DraftEditing) {
+                        *focus = Focus::Sidebar(0);
+                    }
+                }
+                for key in keys.into_iter().take(result.edited) {
+                    pending.remove(&key);
+                }
                 *notice = Some(format!("comment failed: {error}"));
                 None
             }
@@ -1117,14 +1164,14 @@ impl DetailsDialog {
                 comment,
                 pending,
                 reveal,
-                posting,
+                submitting,
                 notice,
                 ..
             } => {
                 // The bottom row becomes the review status line while review mode is
-                // active or a comment posts: only the state, its label centered on the
-                // purple fill.
-                let status = if *posting {
+                // active or a conversation submit runs: only the state, its label centered
+                // on the purple fill.
+                let status = if submitting.is_some() {
                     Some(" SUBMITTING ")
                 } else {
                     files.review().filter(|r| r.active).map(|r| {
@@ -1387,8 +1434,8 @@ const REVIEW_HELP: &[(&str, &str)] = &[
 
 /// The conversation views' comment commands.
 const COMMENT_HELP: &[(&str, &str)] = &[
-    ("submit", "post the comment"),
-    ("discard", "drop the comment draft"),
+    ("submit", "post the draft and send the pending edits"),
+    ("discard", "drop the draft and the pending edits"),
 ];
 
 fn render_command_panel(
@@ -3192,6 +3239,22 @@ mod tests {
         d
     }
 
+    fn pull_dialog_with(timeline: Vec<TimelineItem>) -> DetailsDialog {
+        let mut d = DetailsDialog::new(5, "Fix".into(), "Loading");
+        let mut c = content("desc", timeline);
+        c.panes = Panes::Pull {
+            commits: vec![],
+            files: vec![],
+            owner: "o".into(),
+            repo: "r".into(),
+            head_oid: "abc".into(),
+            pull_id: "PR_1".into(),
+            threads: vec![],
+        };
+        d.set_result(Ok::<_, String>(c));
+        d
+    }
+
     fn command(d: &mut DetailsDialog, text: &str) -> DetailsEvent {
         assert_eq!(
             d.handle_key(KeyModifiers::NONE, KeyCode::Char(':')),
@@ -3235,7 +3298,9 @@ mod tests {
         let rows = render_rows(100, 30, |f| d.render(f.area(), f.buffer_mut()));
         assert!(
             rows.iter().any(|r| r.contains(" command "))
-                && rows.iter().any(|r| r.contains("post the comment"))
+                && rows
+                    .iter()
+                    .any(|r| r.contains("post the draft and send the pending edits"))
                 && !rows.iter().any(|r| r.contains("start review mode")),
             "the conversation opens the comment command line: {rows:?}"
         );
@@ -3521,5 +3586,258 @@ mod tests {
             Some(CommentRefetch::Issue("N_1".into())),
             "an issue overlay refetches by node id"
         );
+    }
+
+    #[test]
+    /// TU-R-086, TU-R-095, TU-E-059, TU-E-069 — `:submit` saves whatever inline editor is
+    /// focused, then sends the draft when one exists and every pending edit in box order, the
+    /// description body before a timeline comment; pending edits with no draft carry
+    /// `draft: None`; neither answers `no comment to submit`; a partial failure keeps only the
+    /// unsent edit pending, drops the accepted one and the draft, and shows the error.
+    fn ut_conversation_submit_pending_edits() {
+        let mut d = pull_dialog_with(vec![comment(Some("a"), "loaded")]);
+        assert_eq!(command(&mut d, "submit"), DetailsEvent::Consumed);
+        dismiss(&mut d, "no comment to submit");
+        assert_eq!(command(&mut d, "submit x"), DetailsEvent::Consumed);
+        dismiss(&mut d, "usage: submit");
+
+        for _ in 0..3 {
+            d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('e'));
+        d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('d'));
+        for key in [
+            KeyCode::Char('i'),
+            KeyCode::Char('n'),
+            KeyCode::Char('e'),
+            KeyCode::Char('w'),
+            KeyCode::Esc,
+        ] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('e'));
+        d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('d'));
+        for key in [
+            KeyCode::Char('i'),
+            KeyCode::Char('c'),
+            KeyCode::Char('2'),
+            KeyCode::Esc,
+        ] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+
+        assert_eq!(
+            command(&mut d, "submit"),
+            DetailsEvent::Submit(CommentAction {
+                subject_id: "N_1".into(),
+                draft: None,
+                edits: vec![
+                    Edit {
+                        target: EditTarget::PullBody { id: "N_1".into() },
+                        body: "new".into(),
+                    },
+                    Edit {
+                        target: EditTarget::Comment { id: "IC_1".into() },
+                        body: "c2".into(),
+                    },
+                ],
+            }),
+            "pending edits alone: draft is None, edits in box order"
+        );
+        assert_eq!(status_row(&mut d).trim_matches(['│', ' ']), "SUBMITTING");
+
+        d.handle_submit(CommentResult {
+            posted: false,
+            edited: 1,
+            outcome: Err(crate::github::GithubError::Graphql("nope".into())),
+        });
+        dismiss(&mut d, "comment failed: github: nope");
+        assert!(
+            matches!(
+                &d.content,
+                Content::Loaded { pending, .. }
+                    if !pending.contains_key(&EditKey::Body)
+                        && pending.contains_key(&EditKey::Comment(0))
+            ),
+            "the accepted edit is dropped, the unsent one stays local"
+        );
+
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('c'));
+        for key in [
+            KeyCode::Char('i'),
+            KeyCode::Char('h'),
+            KeyCode::Char('i'),
+            KeyCode::Esc,
+        ] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert_eq!(
+            command(&mut d, "submit"),
+            DetailsEvent::Submit(CommentAction {
+                subject_id: "N_1".into(),
+                draft: Some("hi".into()),
+                edits: vec![Edit {
+                    target: EditTarget::Comment { id: "IC_1".into() },
+                    body: "c2".into(),
+                }],
+            }),
+            "a retry sends only the draft and the unsent edit"
+        );
+        assert_eq!(
+            d.handle_submit(CommentResult {
+                posted: true,
+                edited: 1,
+                outcome: Ok(()),
+            }),
+            Some(CommentRefetch::Pull(PullRequestRef {
+                owner: "o".into(),
+                repo: "r".into(),
+                number: 5,
+            })),
+            "success requests the pull request anew"
+        );
+        assert!(
+            matches!(
+                &d.content,
+                Content::Loaded { pending, comment, .. } if pending.is_empty() && comment.is_none()
+            ),
+            "success drops every pending edit and the draft"
+        );
+    }
+
+    #[test]
+    /// TU-R-097, TU-E-062 — `:discard` with a draft and a pending edit drops both, the comment
+    /// box returning to its loaded body and the draft box closing; with neither, `no comment to
+    /// discard`.
+    fn ut_conversation_discard_drops_edits() {
+        let mut d = pull_dialog_with(vec![comment(Some("a"), "loaded")]);
+        assert_eq!(command(&mut d, "discard"), DetailsEvent::Consumed);
+        dismiss(&mut d, "no comment to discard");
+
+        for _ in 0..4 {
+            d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        }
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                focus: Focus::Comment(0),
+                ..
+            }
+        ));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('e'));
+        d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('d'));
+        for key in [KeyCode::Char('i'), KeyCode::Char('x'), KeyCode::Esc] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('c'));
+        for key in [
+            KeyCode::Char('i'),
+            KeyCode::Char('h'),
+            KeyCode::Char('i'),
+            KeyCode::Esc,
+        ] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert!(shows(&mut d, " comment "));
+
+        assert_eq!(command(&mut d, "discard"), DetailsEvent::Consumed);
+        assert!(!shows(&mut d, " comment "), "discard drops the draft");
+        let rows = render_rows(80, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            left_of(&rows).iter().any(|r| r.contains("loaded")),
+            "the comment box returns to its loaded body: {rows:?}"
+        );
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                pending,
+                focus: Focus::Sidebar(0),
+                ..
+            } if pending.is_empty()
+        ));
+    }
+
+    #[test]
+    /// TU-E-066, TU-E-067 — details arriving anew drop every pending edit and return the focus
+    /// to the first sidebar box; a new dialog starts with no pending edits and no submit in
+    /// flight.
+    fn ut_pending_edits_dropped_on_reload() {
+        let mut d = pull_dialog_with(vec![comment(Some("a"), "loaded")]);
+        for _ in 0..3 {
+            d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('e'));
+        d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('d'));
+        for key in [KeyCode::Char('i'), KeyCode::Char('n'), KeyCode::Esc] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert!(matches!(
+            &d.content,
+            Content::Loaded { pending, .. } if !pending.is_empty()
+        ));
+
+        let mut c = content("desc2", vec![]);
+        c.panes = Panes::Pull {
+            commits: vec![],
+            files: vec![],
+            owner: "o".into(),
+            repo: "r".into(),
+            head_oid: "abc".into(),
+            pull_id: "PR_1".into(),
+            threads: vec![],
+        };
+        d.set_result(Ok::<_, String>(c));
+        assert!(
+            matches!(
+                &d.content,
+                Content::Loaded {
+                    pending,
+                    focus: Focus::Sidebar(0),
+                    ..
+                } if pending.is_empty()
+            ),
+            "arriving anew drops pending edits and returns the focus to the first sidebar box"
+        );
+
+        let mut d2 = pull_dialog_with(vec![comment(Some("a"), "loaded")]);
+        for _ in 0..3 {
+            d2.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        }
+        d2.handle_key(KeyModifiers::NONE, KeyCode::Char('e'));
+        d2.handle_key(KeyModifiers::CONTROL, KeyCode::Char('d'));
+        for key in [KeyCode::Char('i'), KeyCode::Char('n'), KeyCode::Esc] {
+            d2.handle_key(KeyModifiers::NONE, key);
+        }
+        d2.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert!(matches!(
+            command(&mut d2, "submit"),
+            DetailsEvent::Submit(_)
+        ));
+        assert!(
+            matches!(
+                &d2.content,
+                Content::Loaded { pending, submitting: Some(_), .. } if !pending.is_empty()
+            ),
+            "the dialog to be dropped holds a pending edit and a submit in flight"
+        );
+        drop(d2);
+        let fresh = pull_dialog_with(vec![]);
+        assert!(matches!(
+            &fresh.content,
+            Content::Loaded {
+                pending,
+                focus: Focus::Sidebar(0),
+                submitting: None,
+                ..
+            } if pending.is_empty()
+        ));
     }
 }
