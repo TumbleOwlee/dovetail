@@ -1,6 +1,8 @@
 //! Details overlay shared by issues and pull requests: a description card and one box per
 //! timeline item at the left, scrolled together, and a bar of focusable boxes at the right.
 
+use std::collections::BTreeMap;
+
 use crossterm::event::{KeyCode, KeyModifiers};
 use ferrowl_ui::state::{
     CodeInputFieldStateBuilder, CommandLineOutcome, CommandLineState, MarkdownInputFieldState,
@@ -219,15 +221,196 @@ pub enum CommentRefetch {
     Issue(String),
 }
 
+/// Which entry an edit belongs to; the order is the order the boxes appear, which is the order
+/// a submit sends them (TU-R-095).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EditKey {
+    Body,
+    Comment(usize),
+}
+
+/// Which member of the conversation focus cycle holds the keys (TU-R-089).
+#[derive(Debug)]
+enum Focus {
+    /// Index into `DetailsContent::boxes`.
+    Sidebar(usize),
+    Body,
+    /// Index into `DetailsContent::timeline`.
+    Comment(usize),
+    /// An inline editor is open on this entry and takes every key (TU-R-096).
+    Editing {
+        key: EditKey,
+        editor: Box<MarkdownInputFieldState>,
+    },
+    /// The draft box holds the focus, its editor not taking keys.
+    Draft,
+    /// The draft editor takes every key — what `comment_focused: true` used to mean.
+    DraftEditing,
+}
+
+impl Focus {
+    /// The pending-edit key this focus edits, `None` for a sidebar box or the draft.
+    fn key(&self) -> Option<EditKey> {
+        match self {
+            Focus::Body => Some(EditKey::Body),
+            Focus::Comment(i) => Some(EditKey::Comment(*i)),
+            Focus::Editing { key, .. } => Some(*key),
+            Focus::Sidebar(_) | Focus::Draft | Focus::DraftEditing => None,
+        }
+    }
+}
+
+/// The focus cycle's members in order (TU-R-089): the sidebar boxes, the description card when
+/// its body is editable, every editable timeline comment in loaded order, then the draft box
+/// while one is open.
+fn cycle(content: &DetailsContent, draft: bool) -> Vec<Focus> {
+    let mut members: Vec<Focus> = (0..content.boxes.len().max(1))
+        .map(Focus::Sidebar)
+        .collect();
+    if content.body_editable {
+        members.push(Focus::Body);
+    }
+    for (i, item) in content.timeline.iter().enumerate() {
+        if let Event::Comment { editable: true, .. } = &item.event {
+            members.push(Focus::Comment(i));
+        }
+    }
+    if draft {
+        members.push(Focus::DraftEditing);
+    }
+    members
+}
+
+/// `cycle` never yields `Editing`, so every member it holds can be rebuilt from a reference.
+fn clone_member(f: &Focus) -> Focus {
+    match f {
+        Focus::Sidebar(i) => Focus::Sidebar(*i),
+        Focus::Body => Focus::Body,
+        Focus::Comment(i) => Focus::Comment(*i),
+        Focus::Draft => Focus::Draft,
+        Focus::DraftEditing => Focus::DraftEditing,
+        Focus::Editing { .. } => unreachable!("cycle never holds an open editor"),
+    }
+}
+
+/// `focus`'s position in `cyc`, falling back to `0` when the member it names is no longer
+/// there (a comment that stopped being editable, a draft box just closed).
+fn position_in(focus: &Focus, cyc: &[Focus]) -> usize {
+    if let Focus::Sidebar(i) = focus {
+        return *i;
+    }
+    if matches!(focus, Focus::Draft | Focus::DraftEditing) {
+        return cyc
+            .iter()
+            .position(|f| matches!(f, Focus::DraftEditing))
+            .unwrap_or(0);
+    }
+    if let Some(key) = focus.key() {
+        return cyc.iter().position(|f| f.key() == Some(key)).unwrap_or(0);
+    }
+    0
+}
+
+/// The entry's currently loaded body, before any pending edit.
+fn loaded_body(content: &DetailsContent, key: EditKey) -> String {
+    match key {
+        EditKey::Body => content.body.clone(),
+        EditKey::Comment(i) => match content.timeline.get(i).map(|item| &item.event) {
+            Some(Event::Comment { body, .. }) => body.clone(),
+            _ => String::new(),
+        },
+    }
+}
+
+/// Leaves the focused member in place: an open draft editor keeps its draft and closes the box
+/// when blank (TU-R-085); an open inline editor saves a changed body as a pending edit and
+/// drops one equal to the loaded body (TU-R-092, TU-R-093).
+fn apply_leave(
+    content: &DetailsContent,
+    focus: &mut Focus,
+    comment: &mut Option<Box<MarkdownInputFieldState>>,
+    pending: &mut BTreeMap<EditKey, String>,
+) {
+    match focus {
+        Focus::DraftEditing => {
+            if let Some(state) = comment {
+                state.set_focused(false);
+                if state.content().trim().is_empty() {
+                    *comment = None;
+                }
+            }
+            *focus = if comment.is_some() {
+                Focus::Draft
+            } else {
+                Focus::Sidebar(0)
+            };
+        }
+        Focus::Editing { key, editor } => {
+            let key = *key;
+            let text = editor.content().trim().to_string();
+            let loaded = loaded_body(content, key);
+            if text.is_empty() || text == loaded.trim() {
+                pending.remove(&key);
+            } else {
+                pending.insert(key, text);
+            }
+            *focus = match key {
+                EditKey::Body => Focus::Body,
+                EditKey::Comment(i) => Focus::Comment(i),
+            };
+        }
+        Focus::Sidebar(_) | Focus::Body | Focus::Comment(_) | Focus::Draft => {}
+    }
+}
+
+/// Leaves the focused member (if any) and steps the cycle by one, wrapping at both ends
+/// (TU-R-089); the landing member is revealed if it is a card (TU-R-090) and its editor takes
+/// the focus if it is the draft box.
+fn step_focus(
+    content: &DetailsContent,
+    focus: &mut Focus,
+    comment: &mut Option<Box<MarkdownInputFieldState>>,
+    pending: &mut BTreeMap<EditKey, String>,
+    reveal: &mut Option<EditKey>,
+    cursor: &mut usize,
+    forward: bool,
+) {
+    let before = cycle(content, comment.is_some());
+    let pos = position_in(focus, &before);
+    let next_index = if before.is_empty() {
+        0
+    } else if forward {
+        (pos + 1) % before.len()
+    } else {
+        (pos + before.len() - 1) % before.len()
+    };
+    apply_leave(content, focus, comment, pending);
+    let after = cycle(content, comment.is_some());
+    let landed = if after.is_empty() {
+        Focus::Sidebar(0)
+    } else {
+        clone_member(after.get(next_index).unwrap_or(&after[0]))
+    };
+    if let Some(key) = landed.key() {
+        *reveal = Some(key);
+    }
+    if matches!(landed, Focus::DraftEditing)
+        && let Some(state) = comment
+    {
+        state.set_focused(true);
+    }
+    *focus = landed;
+    *cursor = 0;
+}
+
 enum Content {
     Loading,
     Failed(String),
     Loaded {
         content: Box<DetailsContent>,
         scroll: usize,
-        /// Index of the focused box.
-        focus: usize,
-        /// Entry the focused box's cursor rests on.
+        focus: Focus,
+        /// Entry the focused sidebar box's cursor rests on.
         cursor: usize,
         tab: DetailsTab,
         /// Ctrl+T was pressed; the next key selects a tab.
@@ -239,8 +422,11 @@ enum Content {
         command: Box<CommandLineState>,
         /// The conversation comment draft editor while its box is open.
         comment: Option<Box<MarkdownInputFieldState>>,
-        /// The comment editor holds the conversation view's focus.
-        comment_focused: bool,
+        /// Edits typed locally, not yet sent: the description card's body or a timeline
+        /// comment's, keyed by which.
+        pending: BTreeMap<EditKey, String>,
+        /// A card the next render must scroll fully into view (TU-R-090).
+        reveal: Option<EditKey>,
         /// A comment post is running; the draft is locked until its outcome.
         posting: bool,
         /// A message popup outside review mode, dismissed by the next key.
@@ -281,13 +467,14 @@ impl DetailsDialog {
                 }),
                 content: Box::new(content),
                 scroll: 0,
-                focus: 0,
+                focus: Focus::Sidebar(0),
                 cursor: 0,
                 tab: DetailsTab::Conversation,
                 prefix: false,
                 command: Box::default(),
                 comment: None,
-                comment_focused: false,
+                pending: BTreeMap::new(),
+                reveal: None,
                 posting: false,
                 notice: None,
             },
@@ -404,9 +591,9 @@ impl DetailsDialog {
             &self.content,
             Content::Loaded {
                 tab: DetailsTab::Conversation,
-                comment_focused: true,
+                focus,
                 ..
-            }
+            } if matches!(focus, Focus::DraftEditing | Focus::Editing { .. })
         );
         if !armed && !widget_focused && matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
             return DetailsEvent::Close;
@@ -422,7 +609,8 @@ impl DetailsDialog {
             files,
             command,
             comment,
-            comment_focused,
+            pending,
+            reveal,
             posting,
             notice,
         } = &mut self.content
@@ -456,7 +644,44 @@ impl DetailsDialog {
         }
         match tab {
             DetailsTab::Conversation => {
-                if *comment_focused && let Some(state) = comment {
+                if let Focus::Editing { editor, .. } = focus {
+                    if (modifiers, code) == (KeyModifiers::CONTROL, KeyCode::Char('d')) {
+                        // Delete through the editor's own vim pipeline so `u` restores it.
+                        for (m, k) in [
+                            (KeyModifiers::NONE, KeyCode::Esc),
+                            (KeyModifiers::NONE, KeyCode::Char('g')),
+                            (KeyModifiers::NONE, KeyCode::Char('g')),
+                            (KeyModifiers::SHIFT, KeyCode::Char('V')),
+                            (KeyModifiers::SHIFT, KeyCode::Char('G')),
+                            (KeyModifiers::NONE, KeyCode::Char('d')),
+                        ] {
+                            editor.handle_events(m, k);
+                        }
+                        return DetailsEvent::Consumed;
+                    }
+                    match editor.handle_events(modifiers, code) {
+                        EventResult::Consumed => return DetailsEvent::Consumed,
+                        EventResult::Unhandled(..) => {
+                            match code {
+                                KeyCode::Esc => apply_leave(content, focus, comment, pending),
+                                KeyCode::Tab | KeyCode::BackTab => step_focus(
+                                    content,
+                                    focus,
+                                    comment,
+                                    pending,
+                                    reveal,
+                                    cursor,
+                                    code == KeyCode::Tab,
+                                ),
+                                _ => {}
+                            }
+                            return DetailsEvent::Consumed;
+                        }
+                    }
+                }
+                if matches!(focus, Focus::DraftEditing)
+                    && let Some(state) = comment
+                {
                     if (modifiers, code) == (KeyModifiers::CONTROL, KeyCode::Char('d')) {
                         // Delete through the editor's own vim pipeline so `u` restores it.
                         for (m, k) in [
@@ -474,12 +699,18 @@ impl DetailsDialog {
                     match state.handle_events(modifiers, code) {
                         EventResult::Consumed => return DetailsEvent::Consumed,
                         EventResult::Unhandled(..) => {
-                            if code == KeyCode::Esc {
-                                state.set_focused(false);
-                                if state.content().trim().is_empty() {
-                                    *comment = None;
-                                }
-                                *comment_focused = false;
+                            match code {
+                                KeyCode::Esc => apply_leave(content, focus, comment, pending),
+                                KeyCode::Tab | KeyCode::BackTab => step_focus(
+                                    content,
+                                    focus,
+                                    comment,
+                                    pending,
+                                    reveal,
+                                    cursor,
+                                    code == KeyCode::Tab,
+                                ),
+                                _ => {}
                             }
                             return DetailsEvent::Consumed;
                         }
@@ -494,7 +725,7 @@ impl DetailsDialog {
                                 Box::new(crate::view::dialog::review::comment_field(""))
                             });
                             state.set_focused(true);
-                            *comment_focused = true;
+                            *focus = Focus::DraftEditing;
                         }
                         return DetailsEvent::Consumed;
                     }
@@ -502,29 +733,51 @@ impl DetailsDialog {
                         command.open();
                         return DetailsEvent::Consumed;
                     }
-                    (KeyModifiers::NONE, KeyCode::Tab | KeyCode::BackTab) if comment.is_some() => {
-                        let boxes = content.boxes.len().max(1);
-                        let forward = code == KeyCode::Tab;
-                        if *comment_focused {
-                            if let Some(state) = comment {
-                                state.set_focused(false);
-                                if state.content().trim().is_empty() {
-                                    *comment = None;
-                                }
-                            }
-                            *comment_focused = false;
-                            *focus = if forward { 0 } else { boxes - 1 };
-                        } else if (forward && *focus + 1 == boxes) || (!forward && *focus == 0) {
-                            if let Some(state) = comment {
-                                state.set_focused(true);
-                            }
-                            *comment_focused = true;
-                        } else if forward {
-                            *focus += 1;
-                        } else {
-                            *focus -= 1;
+                    (KeyModifiers::NONE, KeyCode::Char('e')) => {
+                        if *posting {
+                            *notice = Some("busy".to_string());
+                            return DetailsEvent::Consumed;
                         }
-                        *cursor = 0;
+                        match &*focus {
+                            Focus::Body => {
+                                let key = EditKey::Body;
+                                let text = pending
+                                    .get(&key)
+                                    .cloned()
+                                    .unwrap_or_else(|| content.body.clone());
+                                let mut editor =
+                                    Box::new(crate::view::dialog::review::comment_field(&text));
+                                editor.set_focused(true);
+                                *focus = Focus::Editing { key, editor };
+                            }
+                            Focus::Comment(i) => {
+                                let key = EditKey::Comment(*i);
+                                let text = pending
+                                    .get(&key)
+                                    .cloned()
+                                    .unwrap_or_else(|| loaded_body(content, key));
+                                let mut editor =
+                                    Box::new(crate::view::dialog::review::comment_field(&text));
+                                editor.set_focused(true);
+                                *focus = Focus::Editing { key, editor };
+                            }
+                            Focus::Sidebar(_)
+                            | Focus::Draft
+                            | Focus::Editing { .. }
+                            | Focus::DraftEditing => {}
+                        }
+                        return DetailsEvent::Consumed;
+                    }
+                    (KeyModifiers::NONE, KeyCode::Tab) | (_, KeyCode::BackTab) => {
+                        step_focus(
+                            content,
+                            focus,
+                            comment,
+                            pending,
+                            reveal,
+                            cursor,
+                            code == KeyCode::Tab,
+                        );
                         return DetailsEvent::Consumed;
                     }
                     _ => {}
@@ -572,17 +825,23 @@ impl DetailsDialog {
                 };
             }
         }
-        let boxes = content.boxes.len().max(1);
-        let entries = content.boxes.get(*focus).map_or(0, |b| b.links.len());
+        let entries = match &*focus {
+            Focus::Sidebar(i) => content.boxes.get(*i).map_or(0, |b| b.links.len()),
+            _ => 0,
+        };
         match code {
             KeyCode::Char('j') => *scroll += 1,
             KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
-            KeyCode::Tab => (*focus, *cursor) = ((*focus + 1) % boxes, 0),
-            KeyCode::BackTab => (*focus, *cursor) = ((*focus + boxes - 1) % boxes, 0),
-            KeyCode::Down => *cursor = (*cursor + 1).min(entries.saturating_sub(1)),
-            KeyCode::Up => *cursor = cursor.saturating_sub(1),
-            KeyCode::Enter => {
-                if let Some(link) = content.boxes[*focus].links.get(*cursor) {
+            KeyCode::Down if matches!(&*focus, Focus::Sidebar(_)) => {
+                *cursor = (*cursor + 1).min(entries.saturating_sub(1));
+            }
+            KeyCode::Up if matches!(&*focus, Focus::Sidebar(_)) => {
+                *cursor = cursor.saturating_sub(1);
+            }
+            KeyCode::Enter if matches!(&*focus, Focus::Sidebar(_)) => {
+                if let Focus::Sidebar(i) = &*focus
+                    && let Some(link) = content.boxes.get(*i).and_then(|b| b.links.get(*cursor))
+                {
                     return DetailsEvent::Open(link.clone());
                 }
             }
@@ -685,7 +944,7 @@ impl DetailsDialog {
         let Content::Loaded {
             content,
             comment,
-            comment_focused,
+            focus,
             posting,
             notice,
             ..
@@ -727,7 +986,9 @@ impl DetailsDialog {
                     *notice = Some("no comment to discard".to_string());
                 } else {
                     *comment = None;
-                    *comment_focused = false;
+                    if matches!(focus, Focus::Draft | Focus::DraftEditing) {
+                        *focus = Focus::Sidebar(0);
+                    }
                 }
                 DetailsEvent::Consumed
             }
@@ -762,7 +1023,7 @@ impl DetailsDialog {
     pub fn handle_submit(&mut self, result: CommentResult) -> Option<CommentRefetch> {
         let Content::Loaded {
             comment,
-            comment_focused,
+            focus,
             posting,
             notice,
             ..
@@ -774,7 +1035,9 @@ impl DetailsDialog {
         match result.outcome {
             Ok(()) => {
                 *comment = None;
-                *comment_focused = false;
+                if matches!(focus, Focus::Draft | Focus::DraftEditing) {
+                    *focus = Focus::Sidebar(0);
+                }
                 self.refetch()
             }
             Err(error) => {
@@ -852,6 +1115,8 @@ impl DetailsDialog {
                 files,
                 command,
                 comment,
+                pending,
+                reveal,
                 posting,
                 notice,
                 ..
@@ -938,8 +1203,23 @@ impl DetailsDialog {
                             }
                             None => left,
                         };
-                        render_cards(content, number, scroll, left, buf);
-                        render_bar(&content.boxes, *focus, *cursor, bar, buf);
+                        render_cards(
+                            content,
+                            number,
+                            CardsState {
+                                scroll,
+                                focus,
+                                pending,
+                                reveal,
+                            },
+                            left,
+                            buf,
+                        );
+                        let bar_focus = match focus {
+                            Focus::Sidebar(i) => Some(*i),
+                            _ => None,
+                        };
+                        render_bar(&content.boxes, bar_focus, *cursor, bar, buf);
                         if command.is_open() {
                             render_command_panel(command, COMMENT_HELP, body, buf);
                         }
@@ -957,26 +1237,39 @@ impl DetailsDialog {
     }
 }
 
+/// A card's content below its title line: rendered markdown, an open inline editor, or nothing.
+enum CardBody<'a> {
+    None,
+    Markdown(String),
+    /// The box is editing; the state is the overlay's one open inline editor, its rows already
+    /// settled against the space the overlay body leaves.
+    Editor {
+        state: &'a mut MarkdownInputFieldState,
+        rows: u16,
+    },
+}
+
 /// ` [<index>] <title> ` per tab, the active one selected.
 /// A bordered card's text: title line, then its lines.
-struct CardText {
+struct CardText<'a> {
     title: String,
     margin: Margin,
     lines: Vec<Line<'static>>,
-    /// Markdown drawn below the lines; empty for none.
-    body: String,
+    body: CardBody<'a>,
     /// Border color.
     color: Color,
 }
 
-impl CardText {
+impl CardText<'_> {
     /// Rows the card takes with its borders and padding at `width`.
     fn height(&self, width: u16) -> u16 {
         let text_width = width.saturating_sub(2 + 2 * self.margin.horizontal);
-        self.lines.len() as u16
-            + markdown_rows(&self.body, text_width)
-            + 2
-            + 2 * self.margin.vertical
+        let body_rows = match &self.body {
+            CardBody::None => 0,
+            CardBody::Markdown(text) => markdown_rows(text, text_width),
+            CardBody::Editor { rows, .. } => *rows,
+        };
+        self.lines.len() as u16 + body_rows + 2 + 2 * self.margin.vertical
     }
 
     fn render(self, area: Rect, buf: &mut Buffer) {
@@ -993,9 +1286,21 @@ impl CardText {
         Paragraph::new(self.lines)
             .style(theme::base())
             .render(top, buf);
-        if !self.body.trim().is_empty() {
-            let mut state = markdown_state(&self.body, false);
-            StatefulWidget::render(&markdown_widget(), body, buf, &mut state);
+        match self.body {
+            CardBody::None => {}
+            CardBody::Markdown(text) => {
+                if !text.trim().is_empty() {
+                    let mut state = markdown_state(&text, false);
+                    StatefulWidget::render(&markdown_widget(), body, buf, &mut state);
+                }
+            }
+            CardBody::Editor { state, .. } => {
+                let widget = MarkdownInputFieldBuilder::default()
+                    .style(theme::input_field_style())
+                    .build()
+                    .expect("MarkdownInputField fields all default");
+                StatefulWidget::render(&widget, body, buf, state);
+            }
         }
     }
 }
@@ -1129,11 +1434,17 @@ fn render_command_panel(
     StatefulWidget::render(&widget, input, buf, command);
 }
 
-fn render_bar(boxes: &[SidebarBox], focus: usize, cursor: usize, area: Rect, buf: &mut Buffer) {
+fn render_bar(
+    boxes: &[SidebarBox],
+    focus: Option<usize>,
+    cursor: usize,
+    area: Rect,
+    buf: &mut Buffer,
+) {
     let mut y = area.y;
     for (i, item) in boxes.iter().enumerate() {
         let mut lines = item.lines.clone();
-        if i == focus
+        if Some(i) == focus
             && cursor < item.links.len()
             && let Some(line) = lines.get_mut(cursor)
         {
@@ -1149,8 +1460,8 @@ fn render_bar(boxes: &[SidebarBox], focus: usize, cursor: usize, area: Rect, buf
             title: format!(" {} ", item.title),
             margin: BOX_MARGIN,
             lines,
-            body: String::new(),
-            color: if i == focus {
+            body: CardBody::None,
+            color: if Some(i) == focus {
                 theme::TEMPLATE.hi
             } else {
                 theme::TEMPLATE.border
@@ -1226,8 +1537,9 @@ fn review_state(state: ReviewState) -> &'static str {
     }
 }
 
-/// One box per timeline item: a padded comment body, or one event line.
-fn timeline_card(item: &TimelineItem) -> CardText {
+/// One box per timeline item: a padded comment body, or one event line; `body_override`, when
+/// given, replaces a comment's loaded body with its pending text (TU-R-092, TU-R-094).
+fn timeline_card(item: &TimelineItem, body_override: Option<String>) -> CardText<'static> {
     let actor = item.actor.as_deref().unwrap_or("ghost");
     let date: String = item.created_at.chars().take(10).collect();
     let title = format!(" {} · @{actor} · {date} ", event_name(&item.event));
@@ -1295,51 +1607,148 @@ fn timeline_card(item: &TimelineItem) -> CardText {
             ])],
         ),
     };
+    let markdown = body_override.unwrap_or(markdown);
+    let body = if markdown.trim().is_empty() {
+        CardBody::None
+    } else {
+        CardBody::Markdown(markdown)
+    };
     CardText {
         title,
         margin,
         lines,
-        body: markdown,
+        body,
         color: event_color(&item.event),
     }
 }
 
-/// The cards stacked in a buffer as tall as they need, scrolled into `area`.
+/// Takes the open inline editor out of `slot` when it belongs to `key`; `slot` holds at most
+/// one entry, since only one card can be editing at a time.
+fn take_editor<'a>(
+    slot: &mut Option<(EditKey, &'a mut MarkdownInputFieldState)>,
+    key: EditKey,
+) -> Option<&'a mut MarkdownInputFieldState> {
+    if slot.as_ref().map(|(k, _)| *k) == Some(key) {
+        slot.take().map(|(_, state)| state)
+    } else {
+        None
+    }
+}
+
+/// The mutable overlay state `render_cards` reads and updates: where the content is scrolled,
+/// which member is focused, its edits not yet sent, and the card the next frame must scroll
+/// into view.
+struct CardsState<'a> {
+    scroll: &'a mut usize,
+    focus: &'a mut Focus,
+    pending: &'a BTreeMap<EditKey, String>,
+    reveal: &'a mut Option<EditKey>,
+}
+
+/// The cards stacked in a buffer as tall as they need, scrolled into `area`; the focused
+/// description card or comment box highlighted (TU-R-090), one holding a pending edit shown in
+/// the review color with its pending text (TU-R-092, TU-R-094), and the one under an open
+/// inline editor replaced by it (TU-R-091).
 fn render_cards(
     content: &DetailsContent,
     number: u64,
-    scroll: &mut usize,
+    state: CardsState,
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let mut cards = vec![CardText {
+    let CardsState {
+        scroll,
+        focus,
+        pending,
+        reveal,
+    } = state;
+    let focused_key = focus.key();
+    let mut editor_state: Option<(EditKey, &mut MarkdownInputFieldState)> =
+        if let Focus::Editing { key, editor } = focus {
+            Some((*key, editor.as_mut()))
+        } else {
+            None
+        };
+    let cap = area.height.saturating_sub(2 + 2 * CARD_MARGIN.vertical);
+    let text_width = area.width.saturating_sub(2 + 2 * CARD_MARGIN.horizontal);
+
+    let mut desc = CardText {
         title: format!(" #{number} "),
         margin: CARD_MARGIN,
         lines: vec![],
-        body: content.body.clone(),
+        body: CardBody::Markdown(
+            pending
+                .get(&EditKey::Body)
+                .cloned()
+                .unwrap_or_else(|| content.body.clone()),
+        ),
         color: theme::TEMPLATE.border,
-    }];
-    if content.timeline.is_empty() {
-        cards.push(CardText {
-            title: " Timeline ".to_string(),
-            margin: BOX_MARGIN,
-            lines: vec![Line::styled(
-                "No activity",
-                theme::on_bg(theme::TEMPLATE.placeholder),
-            )],
-            body: String::new(),
-            color: theme::TEMPLATE.border,
-        });
+    };
+    if focused_key == Some(EditKey::Body) {
+        desc.color = theme::TEMPLATE.hi;
+    } else if pending.contains_key(&EditKey::Body) {
+        desc.color = theme::TEMPLATE.review;
     }
-    cards.extend(content.timeline.iter().map(timeline_card));
-    let total: u16 = cards.iter().map(|c| c.height(area.width)).sum();
+    if let Some(state) = take_editor(&mut editor_state, EditKey::Body) {
+        let rows = markdown_rows(&state.content(), text_width).max(8).min(cap);
+        desc.body = CardBody::Editor { state, rows };
+    }
+    let mut cards: Vec<(Option<EditKey>, CardText)> = vec![(Some(EditKey::Body), desc)];
+
+    if content.timeline.is_empty() {
+        cards.push((
+            None,
+            CardText {
+                title: " Timeline ".to_string(),
+                margin: BOX_MARGIN,
+                lines: vec![Line::styled(
+                    "No activity",
+                    theme::on_bg(theme::TEMPLATE.placeholder),
+                )],
+                body: CardBody::None,
+                color: theme::TEMPLATE.border,
+            },
+        ));
+    }
+    for (i, item) in content.timeline.iter().enumerate() {
+        let key = matches!(&item.event, Event::Comment { editable: true, .. })
+            .then_some(EditKey::Comment(i));
+        let pending_text = key.and_then(|k| pending.get(&k)).cloned();
+        let mut card = timeline_card(item, pending_text);
+        if let Some(k) = key {
+            if focused_key == Some(k) {
+                card.color = theme::TEMPLATE.hi;
+            } else if pending.contains_key(&k) {
+                card.color = theme::TEMPLATE.review;
+            }
+            if let Some(state) = take_editor(&mut editor_state, k) {
+                let rows = markdown_rows(&state.content(), text_width).max(8).min(cap);
+                card.body = CardBody::Editor { state, rows };
+            }
+        }
+        cards.push((key, card));
+    }
+
+    let total: u16 = cards.iter().map(|(_, c)| c.height(area.width)).sum();
     let mut canvas = Buffer::empty(Rect::new(0, 0, area.width, total));
     canvas.set_style(canvas.area, theme::base());
+    let reveal_key = reveal.take();
+    let mut revealed: Option<(usize, u16)> = None;
     let mut y = 0;
-    for card in cards {
+    for (key, card) in cards {
         let height = card.height(area.width);
+        if reveal_key.is_some() && key == reveal_key {
+            revealed = Some((y as usize, height));
+        }
         card.render(Rect::new(0, y, area.width, height), &mut canvas);
         y += height;
+    }
+    if let Some((y, height)) = revealed {
+        if y < *scroll {
+            *scroll = y;
+        } else if y + height as usize > *scroll + area.height as usize {
+            *scroll = y + height as usize - area.height as usize;
+        }
     }
     *scroll = (*scroll).min((total as usize).saturating_sub(area.height as usize));
     for row in 0..area.height.min(total) {
@@ -1384,6 +1793,26 @@ mod tests {
                 },
             ],
         }
+    }
+
+    /// TU-E-068's shape: no editable body, no editable comment, so the focus cycle is the
+    /// sidebar boxes and the draft box alone.
+    fn plain_content(body: &str, timeline: Vec<TimelineItem>) -> DetailsContent {
+        DetailsContent {
+            body_editable: false,
+            ..content(body, timeline)
+        }
+    }
+
+    fn locked_comment(actor: Option<&str>, body: &str) -> TimelineItem {
+        item(
+            actor,
+            Event::Comment {
+                id: "IC_2".into(),
+                body: body.into(),
+                editable: false,
+            },
+        )
     }
 
     fn item(actor: Option<&str>, event: Event) -> TimelineItem {
@@ -1835,7 +2264,7 @@ mod tests {
         );
         d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
         assert!(
-            matches!(&d.content, Content::Loaded { focus: 0, files, .. } if files.focus() == crate::view::dialog::files::Panel::Diff),
+            matches!(&d.content, Content::Loaded { focus: Focus::Sidebar(0), files, .. } if files.focus() == crate::view::dialog::files::Panel::Diff),
             "Tab moves the panel focus, not the bar's"
         );
         ctrl_t(&mut d);
@@ -2155,7 +2584,7 @@ mod tests {
     /// TU-R-068, TU-R-069, TU-E-026 — the bar stacks the boxes with `None` for empty ones, clipped at the bottom; the first box is focused and Tab cycles the focus, the left content still scrolls.
     fn ut_bar_boxes_and_focus() {
         let mut d = DetailsDialog::new(5, "T".into(), "L");
-        d.set_result(Ok::<_, String>(content("body", vec![])));
+        d.set_result(Ok::<_, String>(plain_content("body", vec![])));
         let rows = render_rows(80, 30, |f| d.render(f.area(), f.buffer_mut()));
         let bar = bar_of(&rows, BAR_LEFT_80);
         let at = |title: &str| {
@@ -2234,6 +2663,487 @@ mod tests {
         assert!(
             !bar.iter().any(|r| r.contains("Labels")),
             "clipped: {bar:?}"
+        );
+    }
+
+    #[test]
+    /// TU-R-085, TU-R-089, TU-R-090, TU-R-098, TU-E-068 — Tab cycles the sidebar boxes, then the
+    /// description card, then every editable comment in loaded order (a locked comment
+    /// skipped), then the draft box while one is open, wrapping at both ends; Shift+Tab runs
+    /// it in reverse; taking the focus scrolls the card fully into view and a following `j`
+    /// still scrolls; with no editable body and no editable comment the cycle holds the
+    /// sidebar boxes and the draft box alone.
+    fn ut_conversation_focus_cycle() {
+        let mut d = DetailsDialog::new(5, "T".into(), "L");
+        let mut timeline = vec![
+            comment(Some("a"), "one"),
+            locked_comment(Some("b"), "locked"),
+            comment(Some("c"), "two"),
+        ];
+        for i in 0..10 {
+            timeline.push(item(
+                Some("o"),
+                Event::Assigned {
+                    login: format!("u{i}"),
+                },
+            ));
+        }
+        d.set_result(Ok::<_, String>(content("desc", timeline)));
+
+        #[derive(Debug, PartialEq, Eq)]
+        enum FocusKind {
+            Sidebar(usize),
+            Body,
+            Comment(usize),
+            Draft,
+            DraftEditing,
+            Editing,
+        }
+
+        fn kind(d: &DetailsDialog) -> FocusKind {
+            let Content::Loaded { focus, .. } = &d.content else {
+                panic!("not loaded");
+            };
+            match focus {
+                Focus::Sidebar(i) => FocusKind::Sidebar(*i),
+                Focus::Body => FocusKind::Body,
+                Focus::Comment(i) => FocusKind::Comment(*i),
+                Focus::Draft => FocusKind::Draft,
+                Focus::DraftEditing => FocusKind::DraftEditing,
+                Focus::Editing { .. } => FocusKind::Editing,
+            }
+        }
+
+        assert_eq!(kind(&d), FocusKind::Sidebar(0));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(kind(&d), FocusKind::Body, "past the last sidebar box");
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(
+            kind(&d),
+            FocusKind::Comment(0),
+            "the first editable comment"
+        );
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(
+            kind(&d),
+            FocusKind::Comment(2),
+            "the locked comment is skipped"
+        );
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(
+            kind(&d),
+            FocusKind::Sidebar(0),
+            "no draft open: wraps to the first sidebar box"
+        );
+        d.handle_key(KeyModifiers::SHIFT, KeyCode::BackTab);
+        assert_eq!(
+            kind(&d),
+            FocusKind::Comment(2),
+            "Shift+Tab (BackTab with the shift modifier a real terminal sends) reverse wraps to the last member"
+        );
+
+        let rows = render_rows(80, 12, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            left_of(&rows).iter().any(|r| r.contains("Comment · @c")),
+            "the focused comment is scrolled fully into view: {rows:?}"
+        );
+        let buf = render_buffer(80, 12, |f| d.render(f.area(), f.buffer_mut()));
+        let buf_rows = crate::testkit::buffer_rows(&buf);
+        let card_row = left_of(&buf_rows)
+            .iter()
+            .position(|r| r.contains("Comment · @c"))
+            .expect("comment box");
+        let corner_x = left_of(&buf_rows)[card_row].find('┌').expect("corner") as u16;
+        assert_eq!(
+            buf[(corner_x, card_row as u16)].fg,
+            theme::TEMPLATE.hi,
+            "the focused card's border is highlighted"
+        );
+        assert!(
+            (0..12u16).all(|y| {
+                let bar_row = bar_of(&buf_rows, BAR_LEFT_80)[y as usize].clone();
+                match bar_row.find('┌') {
+                    Some(i) => buf[(BAR_LEFT_80 as u16 + i as u16, y)].fg != theme::TEMPLATE.hi,
+                    None => true,
+                }
+            }),
+            "no bar box is highlighted while a card holds the focus"
+        );
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('j'));
+        let rows2 = render_rows(80, 12, |f| d.render(f.area(), f.buffer_mut()));
+        assert_ne!(rows, rows2, "j still scrolls with the focus on a card");
+
+        for _ in 0..5 {
+            d.handle_key(KeyModifiers::NONE, KeyCode::BackTab);
+        }
+        assert_eq!(kind(&d), FocusKind::Sidebar(0));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('c'));
+        for key in [
+            KeyCode::Char('i'),
+            KeyCode::Char('h'),
+            KeyCode::Char('i'),
+            KeyCode::Esc,
+        ] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert_eq!(
+            kind(&d),
+            FocusKind::Draft,
+            "leaving a non-blank draft keeps the box, idle"
+        );
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(
+            kind(&d),
+            FocusKind::Sidebar(0),
+            "forward from the last member wraps to the first"
+        );
+        d.handle_key(KeyModifiers::NONE, KeyCode::BackTab);
+        assert_eq!(
+            kind(&d),
+            FocusKind::DraftEditing,
+            "stepping onto the draft box focuses its editor"
+        );
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert_eq!(command(&mut d, "discard"), DetailsEvent::Consumed);
+        assert!(!shows(&mut d, " comment "), "discard drops the draft");
+        d.handle_key(KeyModifiers::NONE, KeyCode::BackTab);
+        assert_eq!(
+            kind(&d),
+            FocusKind::Comment(2),
+            "the closed draft box leaves the cycle"
+        );
+
+        let mut d = DetailsDialog::new(6, "T".into(), "L");
+        d.set_result(Ok::<_, String>(plain_content(
+            "desc",
+            vec![locked_comment(Some("z"), "nope")],
+        )));
+        assert_eq!(kind(&d), FocusKind::Sidebar(0));
+        for _ in 0..3 {
+            d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        }
+        assert_eq!(
+            kind(&d),
+            FocusKind::Sidebar(0),
+            "the cycle is the sidebar boxes alone"
+        );
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('e')),
+            DetailsEvent::Consumed
+        );
+        assert_eq!(kind(&d), FocusKind::Sidebar(0), "e opens nothing");
+    }
+
+    #[test]
+    /// TU-R-091, TU-R-092, TU-R-093, TU-R-094, TU-R-099, TU-E-064, TU-E-065 — `e` on the focused
+    /// description card or a focused editable comment box replaces the rendered body with an
+    /// editor prefilled with the shown text, the box keeping its title and border; leaving it
+    /// keeps the typed text as the rendered body, a blank or unchanged one dropping the pending
+    /// mark; an unfocused box holding a pending edit draws the review color; `e` on a sidebar
+    /// box or the draft box opens nothing, and `e` while a post runs answers `busy`.
+    fn ut_inline_editor_opens_and_keeps_pending() {
+        let mut d = DetailsDialog::new(5, "T".into(), "L");
+        let timeline = vec![comment(Some("a"), "loaded")];
+        d.set_result(Ok::<_, String>(content("desc body", timeline)));
+
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('e')),
+            DetailsEvent::Consumed
+        );
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                focus: Focus::Sidebar(0),
+                ..
+            }
+        ));
+
+        for _ in 0..3 {
+            d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        }
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                focus: Focus::Body,
+                ..
+            }
+        ));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('e'));
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                focus: Focus::Editing {
+                    key: EditKey::Body,
+                    ..
+                },
+                ..
+            }
+        ));
+        let rows = render_rows(80, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            left_of(&rows).iter().any(|r| r.contains("desc body")),
+            "prefilled with the shown body: {rows:?}"
+        );
+        let left = left_of(&rows);
+        assert!(
+            left.iter().any(|r| r.contains("┌ #5 ")),
+            "the box keeps its title: {rows:?}"
+        );
+        let top = left.iter().position(|r| r.contains("┌ #5 ")).expect("top");
+        let next = left[top + 1..]
+            .iter()
+            .position(|r| r.contains('┌'))
+            .map(|i| top + 1 + i)
+            .unwrap_or(left.len());
+        assert!(
+            next - top >= 8 + 2,
+            "at least eight rows on a tall terminal: {} rows, {rows:?}",
+            next - top
+        );
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('e')),
+            DetailsEvent::Consumed,
+            "already editing"
+        );
+
+        let short_rows = render_rows(80, 10, |f| d.render(f.area(), f.buffer_mut()));
+        let short_left = left_of(&short_rows);
+        let short_top = short_left
+            .iter()
+            .position(|r| r.contains("┌ #5 "))
+            .expect("card on a short terminal");
+        let short_bottom = short_left[short_top..]
+            .iter()
+            .position(|r| r.contains('└'))
+            .map(|i| short_top + i);
+        assert!(
+            short_bottom.is_none_or(|b| b - short_top < 8 + 2),
+            "never more rows than a short overlay's body leaves: {short_rows:?}"
+        );
+
+        d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('d'));
+        for key in [
+            KeyCode::Char('i'),
+            KeyCode::Char('n'),
+            KeyCode::Char('e'),
+            KeyCode::Char('w'),
+            KeyCode::Esc,
+        ] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                focus: Focus::Body,
+                ..
+            }
+        ));
+        let rows = render_rows(80, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            left_of(&rows).iter().any(|r| r.contains("new"))
+                && !left_of(&rows).iter().any(|r| r.contains("desc body")),
+            "the pending text replaces the loaded body: {rows:?}"
+        );
+
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                focus: Focus::Comment(0),
+                ..
+            }
+        ));
+        let color_of_row = |r: &str, buf: &Buffer, y: u16| -> Color {
+            let x = r.find('┌').expect("corner") as u16;
+            buf[(x, y)].fg
+        };
+        let buf = render_buffer(80, 30, |f| d.render(f.area(), f.buffer_mut()));
+        let rows = crate::testkit::buffer_rows(&buf);
+        let card = left_of(&rows)
+            .iter()
+            .position(|r| r.contains("┌ #5 "))
+            .expect("description card");
+        assert_eq!(
+            color_of_row(&left_of(&rows)[card], &buf, card as u16),
+            theme::TEMPLATE.review,
+            "an unfocused pending edit draws the review color"
+        );
+
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                focus: Focus::Comment(0),
+                ..
+            }
+        ));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('e'));
+        d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('d'));
+        for key in [
+            KeyCode::Char('i'),
+            KeyCode::Char('l'),
+            KeyCode::Char('o'),
+            KeyCode::Char('a'),
+            KeyCode::Char('d'),
+            KeyCode::Char('e'),
+            KeyCode::Char('d'),
+            KeyCode::Esc,
+        ] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert!(
+            matches!(
+                &d.content,
+                Content::Loaded {
+                    focus: Focus::Comment(0),
+                    pending,
+                    ..
+                } if !pending.contains_key(&EditKey::Comment(0))
+            ),
+            "a body equal to the loaded one drops the pending mark"
+        );
+
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('e'));
+        d.handle_key(KeyModifiers::CONTROL, KeyCode::Char('d'));
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert!(
+            matches!(
+                &d.content,
+                Content::Loaded {
+                    focus: Focus::Comment(0),
+                    pending,
+                    ..
+                } if !pending.contains_key(&EditKey::Comment(0))
+            ),
+            "a blank editor drops the pending mark and returns the loaded body"
+        );
+        let rows = render_rows(80, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert!(
+            left_of(&rows).iter().any(|r| r.contains("loaded")),
+            "the loaded body is back: {rows:?}"
+        );
+
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('c'));
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                focus: Focus::DraftEditing,
+                ..
+            }
+        ));
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Esc),
+            DetailsEvent::Consumed
+        );
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                focus: Focus::Sidebar(0),
+                ..
+            }
+        ));
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('e')),
+            DetailsEvent::Consumed,
+            "e on a sidebar box opens nothing"
+        );
+
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('c'));
+        for key in [
+            KeyCode::Char('i'),
+            KeyCode::Char('h'),
+            KeyCode::Char('i'),
+            KeyCode::Esc,
+        ] {
+            d.handle_key(KeyModifiers::NONE, key);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Esc);
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                focus: Focus::Draft,
+                ..
+            }
+        ));
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('e')),
+            DetailsEvent::Consumed,
+            "e on the parked draft box opens nothing"
+        );
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                focus: Focus::Draft,
+                ..
+            }
+        ));
+        assert!(matches!(command(&mut d, "submit"), DetailsEvent::Submit(_)));
+        assert_eq!(
+            d.handle_key(KeyModifiers::NONE, KeyCode::Char('e')),
+            DetailsEvent::Consumed
+        );
+        dismiss(&mut d, "busy");
+    }
+
+    #[test]
+    /// TU-R-067, TU-R-096 — while a focused inline editor is open, `j`, `k`, `q`, `c`, `e` and
+    /// `:` are consumed by it: the left content does not scroll, `q` does not close the
+    /// overlay, no command line opens, no second editor opens; Tab outside Insert mode still
+    /// cycles.
+    fn ut_inline_editor_swallows_overlay_keys() {
+        let mut d = DetailsDialog::new(5, "T".into(), "L");
+        d.set_result(Ok::<_, String>(content("desc body", vec![])));
+        for _ in 0..3 {
+            d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        }
+        d.handle_key(KeyModifiers::NONE, KeyCode::Char('e'));
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                focus: Focus::Editing { .. },
+                ..
+            }
+        ));
+        let before = render_rows(80, 30, |f| d.render(f.area(), f.buffer_mut()));
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('q'),
+            KeyCode::Char('c'),
+            KeyCode::Char('e'),
+            KeyCode::Char(':'),
+        ] {
+            assert_eq!(
+                d.handle_key(KeyModifiers::NONE, code),
+                DetailsEvent::Consumed,
+                "{code:?}"
+            );
+        }
+        assert!(matches!(
+            &d.content,
+            Content::Loaded {
+                focus: Focus::Editing { .. },
+                ..
+            }
+        ));
+        let after = render_rows(80, 30, |f| d.render(f.area(), f.buffer_mut()));
+        assert_eq!(before, after, "the overlay itself never saw those keys");
+
+        d.handle_key(KeyModifiers::NONE, KeyCode::Tab);
+        assert!(
+            !matches!(
+                &d.content,
+                Content::Loaded {
+                    focus: Focus::Editing { .. },
+                    ..
+                }
+            ),
+            "Tab outside Insert mode still cycles"
         );
     }
 
