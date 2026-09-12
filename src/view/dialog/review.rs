@@ -597,6 +597,7 @@ impl ReviewPanel {
                 .border(Border::Full(Margin::new(1, 0)))
                 .title(Some(title.into()))
                 .style(theme::input_field_style())
+                .markdown_theme(theme::markdown_theme())
                 .build()
                 .expect("MarkdownInputField fields all default")
         };

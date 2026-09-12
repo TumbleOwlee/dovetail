@@ -1243,6 +1243,7 @@ impl DetailsDialog {
                                     .border(Border::Full(Margin::new(1, 0)))
                                     .title(Some(" comment ".into()))
                                     .style(theme::input_field_style())
+                                    .markdown_theme(theme::markdown_theme())
                                     .build()
                                     .expect("MarkdownInputField fields all default");
                                 StatefulWidget::render(&widget, editor, buf, state.as_mut());
@@ -1344,6 +1345,7 @@ impl CardText<'_> {
             CardBody::Editor { state, .. } => {
                 let widget = MarkdownInputFieldBuilder::default()
                     .style(theme::input_field_style())
+                    .markdown_theme(theme::markdown_theme())
                     .build()
                     .expect("MarkdownInputField fields all default");
                 StatefulWidget::render(&widget, body, buf, state);
@@ -1377,6 +1379,7 @@ pub(crate) fn markdown_state(body: &str, active_last: bool) -> MarkdownInputFiel
 pub(crate) fn markdown_widget() -> MarkdownInputField {
     MarkdownInputFieldBuilder::default()
         .style(theme::input_field_style())
+        .markdown_theme(theme::markdown_theme())
         .build()
         .expect("MarkdownInputField fields all default")
 }
@@ -1840,6 +1843,22 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    /// TU-R-101 — the markdown a conversation box renders takes the template's text color for its quoted body, not the library's own.
+    fn ut_markdown_quote_uses_the_template_text() {
+        let mut d = DetailsDialog::new(5, "T".into(), "L");
+        d.set_result(Ok::<_, String>(content("> quoted", vec![])));
+        let buf = render_buffer(80, 24, |f| d.render(f.area(), f.buffer_mut()));
+        let rows = crate::testkit::buffer_rows(&buf);
+        let y = rows
+            .iter()
+            .position(|r| r.contains("quoted"))
+            .expect("quoted row") as u16;
+        let x = rows[y as usize].chars().position(|c| c == 'q').expect("q") as u16;
+        assert_eq!(buf[(x, y)].fg, Color::White);
+        assert!(buf[(x, y)].modifier.contains(Modifier::ITALIC));
     }
 
     /// TU-E-068's shape: no editable body, no editable comment, so the focus cycle is the

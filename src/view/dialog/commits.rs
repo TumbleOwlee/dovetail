@@ -107,6 +107,7 @@ impl CommitsView {
             focused: theme::on_bg(theme::TEMPLATE.hi),
             border: theme::on_bg(theme::TEMPLATE.hi),
             general: theme::on_bg(theme::TEMPLATE.border),
+            rows: theme::table_rows(),
             ..TableStyle::default()
         };
         CommitsView {
@@ -269,6 +270,7 @@ mod tests {
     use super::*;
     use crate::testkit::{buffer_rows, render_buffer};
     use crate::view::theme;
+    use ratatui::style::Color;
 
     fn commit(i: u32, author: CommitAuthor) -> Commit {
         Commit {
@@ -327,6 +329,26 @@ mod tests {
         assert_eq!(v.selected(), Some(0));
         v.handle_key(KeyModifiers::SHIFT, KeyCode::Char('G'));
         assert_eq!(v.selected(), Some(2));
+    }
+
+    #[test]
+    /// TU-R-101 — the commits table draws its row text in the template's text color.
+    fn ut_row_text_uses_the_template_text() {
+        let commits = vec![
+            commit(1, CommitAuthor::User("octo".into())),
+            commit(2, CommitAuthor::Git("Anon Y".into())),
+        ];
+        let mut v = CommitsView::new(&commits);
+        let buf = render_buffer(80, 8, |f| v.render(f.area(), f.buffer_mut()));
+        let rows = buffer_rows(&buf);
+        let y = rows
+            .iter()
+            .position(|r| r.contains("sha0002"))
+            .expect("second data row") as u16;
+        let x = (1..buf.area().width)
+            .find(|&x| buf[(x, y)].symbol() != " ")
+            .expect("non-space cell");
+        assert_eq!(buf[(x, y)].fg, Color::White);
     }
 
     #[test]

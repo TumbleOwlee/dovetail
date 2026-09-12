@@ -2,9 +2,10 @@
 
 use ferrowl_ui::COLOR_SCHEME;
 use ferrowl_ui::style::{
-    DiffViewStyle, InputFieldStyle, SelectionStyle, SyntaxTheme, SyntaxThemeBuilder, TabBarStyle,
+    DiffViewStyle, InputFieldStyle, MarkdownTheme, MarkdownThemeBuilder, SelectionStyle,
+    SyntaxTheme, SyntaxThemeBuilder, TabBarStyle,
 };
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 
 /// Background of every view, darker than the scheme's own.
@@ -25,6 +26,8 @@ pub struct ColorTemplate {
     pub warning: Color,
     /// Review mode: the status label background and local-change gutter marks.
     pub review: Color,
+    pub info: Color,
+    pub row: [Color; 2],
     /// Timeline box borders per entry type.
     pub timeline: TimelineColors,
 }
@@ -48,7 +51,7 @@ pub struct TimelineColors {
 
 pub const TEMPLATE: ColorTemplate = ColorTemplate {
     bg: BG,
-    text: COLOR_SCHEME.text,
+    text: Color::White,
     text_hi: COLOR_SCHEME.text_hi,
     hi: COLOR_SCHEME.hi,
     hi_bg: COLOR_SCHEME.hi_bg,
@@ -58,6 +61,8 @@ pub const TEMPLATE: ColorTemplate = ColorTemplate {
     success: COLOR_SCHEME.success,
     warning: COLOR_SCHEME.warning,
     review: Color::Rgb(72, 40, 116),
+    info: COLOR_SCHEME.info,
+    row: COLOR_SCHEME.row,
     timeline: TimelineColors {
         comment: Color::White,
         closed: COLOR_SCHEME.error,
@@ -133,6 +138,7 @@ pub fn diff_view_style() -> DiffViewStyle {
         general: base(),
         focused: on_bg(TEMPLATE.hi),
         border: on_bg(TEMPLATE.border),
+        selection: Style::default().fg(TEMPLATE.text_hi).bg(TEMPLATE.hi_bg),
         ..DiffViewStyle::default()
     }
 }
@@ -141,8 +147,49 @@ pub fn diff_view_style() -> DiffViewStyle {
 pub fn tab_bar_style() -> TabBarStyle {
     TabBarStyle {
         general: on_bg(TEMPLATE.hi).bold(),
-        ..TabBarStyle::default()
+        selected: Style::default().fg(TEMPLATE.text).bg(TEMPLATE.hi_bg).bold(),
     }
+}
+
+/// The table row styles: the template's text on the two row elevations.
+pub fn table_rows() -> [Style; 2] {
+    [
+        Style::default().fg(TEMPLATE.text).bg(TEMPLATE.row[0]),
+        Style::default().fg(TEMPLATE.text).bg(TEMPLATE.row[1]),
+    ]
+}
+
+/// The markdown styles on the template: the headings and the quote body that the widget
+/// would otherwise color from the scheme's own text color.
+pub fn markdown_theme() -> MarkdownTheme {
+    MarkdownThemeBuilder::default()
+        .heading([
+            Style::default()
+                .fg(TEMPLATE.hi)
+                .add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(TEMPLATE.info)
+                .add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(TEMPLATE.success)
+                .add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(TEMPLATE.warning)
+                .add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(TEMPLATE.text_hi)
+                .add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(TEMPLATE.text)
+                .add_modifier(Modifier::BOLD),
+        ])
+        .quote_text(
+            Style::default()
+                .fg(TEMPLATE.text)
+                .add_modifier(Modifier::DIM | Modifier::ITALIC),
+        )
+        .build()
+        .expect("MarkdownThemeBuilder fields all default")
 }
 
 #[cfg(test)]
@@ -196,5 +243,39 @@ mod tests {
         assert_eq!(TEMPLATE.border, Color::White);
         assert_eq!(TEMPLATE.timeline.comment, Color::White);
         assert_eq!(TEMPLATE.timeline.reviewed, Color::White);
+    }
+
+    #[test]
+    /// TU-R-074, TU-R-100 — the template's text color, and every style built from it, is white, the file tree's modified marker included.
+    fn ut_text_color_is_white() {
+        assert_eq!(TEMPLATE.text, Color::White);
+        assert_eq!(base().fg, Some(Color::White));
+        assert_eq!(status_theme().meta.fg, Some(Color::White));
+    }
+
+    #[test]
+    /// TU-R-100, TU-R-101 — every widget style field that carries plain text takes the template's text color, and the fields carrying a role color of their own keep it.
+    fn ut_widget_text_styles_use_the_template_text() {
+        for fg in [
+            input_field_style().general.fg,
+            selection_style().general.fg,
+            selection_style().rows[0].fg,
+            selection_style().rows[1].fg,
+            status_theme().meta.fg,
+            diff_view_style().general.fg,
+            tab_bar_style().selected.fg,
+            table_rows()[0].fg,
+            table_rows()[1].fg,
+            markdown_theme().quote_text.fg,
+            markdown_theme().heading(6).fg,
+        ] {
+            assert_eq!(fg, Some(Color::White));
+        }
+        assert_eq!(input_field_style().cursor.fg, Some(TEMPLATE.text_hi));
+        assert_eq!(
+            diff_view_style().selection,
+            Style::default().fg(TEMPLATE.text_hi).bg(TEMPLATE.hi_bg)
+        );
+        assert_eq!(tab_bar_style().selected.bg, Some(TEMPLATE.hi_bg));
     }
 }

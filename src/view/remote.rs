@@ -95,6 +95,7 @@ impl RemoteView {
         let style = TableStyle {
             border: theme::on_bg(theme::TEMPLATE.border),
             general: theme::on_bg(theme::TEMPLATE.border),
+            rows: theme::table_rows(),
             ..TableStyle::default()
         };
         RemoteView {
