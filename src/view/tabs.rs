@@ -44,7 +44,7 @@ impl Tab {
 }
 
 /// Columns the tab line takes: the character column and one blank column each side.
-pub const TAB_LINE_WIDTH: u16 = 3;
+pub const TAB_LINE_WIDTH: u16 = 4;
 
 pub fn render_tab_line(area: Rect, buf: &mut Buffer, active: Tab) {
     render_vertical_tabs(
