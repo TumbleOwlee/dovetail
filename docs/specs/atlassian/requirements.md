@@ -19,3 +19,9 @@ heading text verbatim.
 
 **AT-R-001** — The <subject> shall <observable outcome> when <condition>.
 -->
+
+## Jira projects
+
+**AT-R-001** — The application shall list a Jira site's projects through `GET <base_url>/rest/api/3/project/search`, authenticating with HTTP basic auth of the profile's email and token, and read `key` and `name` from each `values` entry.
+**AT-R-002** — A non-success HTTP status or an undecodable body shall be a typed error carrying the status or the decode message.
+**AT-R-003** — Listing shall request at most 100 projects; further pages are not fetched.

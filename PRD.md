@@ -1,6 +1,6 @@
-# PRD — prodgy
+# PRD — dovetail
 
-Product framing for `prodgy`. Normative behavior lives in [`docs/specs/`](./docs/specs/); structure lives in [`ARCHITECTURE.md`](./ARCHITECTURE.md). This document states *why* the project exists and what it is and is not for — it does not restate requirements.
+Product framing for `dovetail`. Normative behavior lives in [`docs/specs/`](./docs/specs/); structure lives in [`ARCHITECTURE.md`](./ARCHITECTURE.md). This document states *why* the project exists and what it is and is not for — it does not restate requirements.
 
 ## Overview
 

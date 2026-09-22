@@ -6,7 +6,7 @@ Router for AI coding agents. Read first.
 
 ## Repo
 
-`prodgy` — TUI application to combine full workflow in a single application. Supports Github (Project, Issue, PR), Atlassian (JIRA, Bitbucket) and the Spec Driven Workflow (using local task board). Provides access to all in one place without accessing any of the websites. TUI application. Product: [`PRD.md`](./PRD.md). Structure: [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+`dovetail` — TUI application to combine full workflow in a single application. Supports Github (Project, Issue, PR), Atlassian (JIRA, Bitbucket) and the Spec Driven Workflow (using local task board). Provides access to all in one place without accessing any of the websites. TUI application. Product: [`PRD.md`](./PRD.md). Structure: [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ## Spec-driven
 
